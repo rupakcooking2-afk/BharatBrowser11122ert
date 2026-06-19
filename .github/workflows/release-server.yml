@@ -1,0 +1,257 @@
+name: Release Bharat Browser Server
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.0.97). Ignored when apply_bump is true."
+        required: false
+        type: string
+      apply_bump:
+        description: "Patch-bump the server version in-place before building; the caller commits it."
+        required: false
+        default: false
+        type: boolean
+      targets:
+        description: "Server build targets to publish to R2"
+        required: false
+        default: all
+        type: string
+      publish_github_release:
+        description: "Create or update the GitHub server release"
+        required: false
+        default: true
+        type: boolean
+    outputs:
+      server_version:
+        description: "The server version that was built and uploaded."
+        value: ${{ jobs.release.outputs.server_version }}
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.0.97). Ignored when apply_bump is true."
+        required: true
+        type: string
+      apply_bump:
+        description: "Patch-bump the server version in-place before building (not committed by this workflow)."
+        required: false
+        default: false
+        type: boolean
+      targets:
+        description: "Server build targets to publish to R2"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - darwin-arm64
+          - darwin-x64
+          - linux-arm64
+          - linux-x64
+          - windows-x64
+      publish_github_release:
+        description: "Create or update the GitHub server release"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: release-server
+  cancel-in-progress: false
+
+jobs:
+  authorize_manual_dispatch:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: release-core
+    steps:
+      - run: echo "Manual dispatch approved through release-core."
+
+  release:
+    needs: authorize_manual_dispatch
+    if: |
+      always() &&
+      (github.event_name != 'workflow_dispatch' || needs.authorize_manual_dispatch.result == 'success')
+    runs-on: ubuntu-latest
+    outputs:
+      server_version: ${{ steps.version.outputs.package_version }}
+    permissions:
+      contents: write
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: packages/browseros-agent
+
+    steps:
+      - name: Validate release ref
+        working-directory: ${{ github.workspace }}
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+        run: |
+          set -euo pipefail
+          expected_ref="refs/heads/$DEFAULT_BRANCH"
+          if [ "$GITHUB_REF" != "$expected_ref" ]; then
+            echo "::error::Server release is only allowed on $DEFAULT_BRANCH (got $GITHUB_REF)"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.6"
+
+      - name: Install dependencies
+        run: bun ci
+
+      - name: Prepare production env file
+        run: cp apps/server/.env.production.example apps/server/.env.production
+
+      - name: Resolve server version
+        id: version
+        env:
+          APPLY_BUMP: ${{ inputs.apply_bump }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          PUBLISH_GITHUB_RELEASE: ${{ inputs.publish_github_release }}
+        run: |
+          set -euo pipefail
+          if [ "$APPLY_BUMP" = "true" ] && [ "$PUBLISH_GITHUB_RELEASE" = "true" ]; then
+            echo "::error::apply_bump cannot be combined with publish_github_release (the bump is committed by the calling workflow, so a tag/release would point at a commit without it)."
+            exit 1
+          fi
+
+          if [ "$APPLY_BUMP" = "true" ]; then
+            PACKAGE_VERSION="$(python3 "$GITHUB_WORKSPACE/packages/browseros/build/scripts/bump_server_version.py" --agent-root .)"
+            echo "Bumped server version in-place to $PACKAGE_VERSION"
+          else
+            PACKAGE_VERSION=$(node -p "require('./apps/server/package.json').version")
+            if [ -n "$REQUESTED_VERSION" ] && [ "$PACKAGE_VERSION" != "$REQUESTED_VERSION" ]; then
+              echo "::error::Requested version $REQUESTED_VERSION does not match apps/server/package.json ($PACKAGE_VERSION)"
+              exit 1
+            fi
+          fi
+
+          echo "package_version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release options
+        env:
+          SERVER_RELEASE_TARGETS: ${{ inputs.targets }}
+          PUBLISH_GITHUB_RELEASE: ${{ inputs.publish_github_release }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISH_GITHUB_RELEASE" = "true" ] && [ "$SERVER_RELEASE_TARGETS" != "all" ]; then
+            echo "::error::Set publish_github_release=false when releasing a subset of server targets."
+            exit 1
+          fi
+
+      - name: Build and upload release artifacts
+        env:
+          BROWSEROS_CONFIG_URL: ${{ vars.BROWSEROS_CONFIG_URL || 'https://llm.browseros.com/api/browseros-server/config' }}
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY || vars.POSTHOG_API_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_DOWNLOAD_PREFIX: artifacts/vendor
+          R2_UPLOAD_PREFIX: artifacts/server
+          NODE_ENV: production
+          LOG_LEVEL: info
+          FORCE_COLOR: 1
+          SERVER_RELEASE_TARGETS: ${{ inputs.targets }}
+        run: bun scripts/build/server.ts --target="$SERVER_RELEASE_TARGETS"
+
+      - name: Verify release artifacts
+        run: |
+          mapfile -t ZIP_FILES < <(find dist/prod/server -maxdepth 1 -type f -name 'browseros-server-resources-*.zip' | sort)
+
+          if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
+            echo "No server release zip files were produced"
+            exit 1
+          fi
+
+          printf 'Found release artifacts:\n%s\n' "${ZIP_FILES[@]}"
+
+      - name: Generate release notes
+        if: ${{ inputs.publish_github_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+        run: |
+          SERVER_APP_PATH="packages/browseros-agent/apps/server"
+          SERVER_BUILD_DIR="packages/browseros-agent/scripts/build/server"
+          SERVER_BUILD_ENTRY="packages/browseros-agent/scripts/build/server.ts"
+          SERVER_RESOURCE_MANIFEST="packages/browseros-agent/scripts/build/config/server-prod-resources.json"
+          SERVER_WORKSPACE_PKG="packages/browseros-agent/package.json"
+          CURRENT_TAG="browseros-server-v$PACKAGE_VERSION"
+          PREV_TAG=$(git tag -l "browseros-server-v*" --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -n 1)
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "Initial release of browseros-server." > /tmp/release-notes.md
+          else
+            COMMITS=$(git log "$PREV_TAG"..HEAD --pretty=format:"%H" -- \
+              "$SERVER_APP_PATH" \
+              "$SERVER_BUILD_DIR" \
+              "$SERVER_BUILD_ENTRY" \
+              "$SERVER_RESOURCE_MANIFEST" \
+              "$SERVER_WORKSPACE_PKG")
+
+            if [ -z "$COMMITS" ]; then
+              echo "No notable changes." > /tmp/release-notes.md
+            else
+              echo "## What's Changed" > /tmp/release-notes.md
+              echo "" >> /tmp/release-notes.md
+
+              while IFS= read -r SHA; do
+                SUBJECT=$(git log -1 --pretty=format:"%s" "$SHA")
+                PR_NUM=$(gh api "/repos/${{ github.repository }}/commits/${SHA}/pulls" --jq '.[0].number // empty' 2>/dev/null)
+
+                if [ -n "$PR_NUM" ] && ! echo "$SUBJECT" | grep -qF "(#${PR_NUM})"; then
+                  echo "- ${SUBJECT} (#${PR_NUM})" >> /tmp/release-notes.md
+                else
+                  echo "- ${SUBJECT}" >> /tmp/release-notes.md
+                fi
+              done <<< "$COMMITS"
+            fi
+          fi
+        working-directory: ${{ github.workspace }}
+
+      - name: Create GitHub release
+        if: ${{ inputs.publish_github_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+          RELEASE_SHA: ${{ steps.version.outputs.release_sha }}
+        run: |
+          TAG="browseros-server-v$PACKAGE_VERSION"
+          TITLE="Bharat Browser Server - v$PACKAGE_VERSION"
+          mapfile -t ZIP_FILES < <(find packages/browseros-agent/dist/prod/server -maxdepth 1 -type f -name 'browseros-server-resources-*.zip' | sort)
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping tag creation"
+          else
+            git tag -a "$TAG" -m "browseros-server v$PACKAGE_VERSION" "$RELEASE_SHA"
+          fi
+
+          if git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
+            echo "Tag $TAG already on remote, skipping push"
+          else
+            git push origin "$TAG"
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, updating"
+            gh release edit "$TAG" --title "$TITLE" --notes-file /tmp/release-notes.md
+            gh release upload "$TAG" "${ZIP_FILES[@]}" --clobber
+          else
+            gh release create "$TAG" \
+              --title "$TITLE" \
+              --notes-file /tmp/release-notes.md \
+              "${ZIP_FILES[@]}"
+          fi
+        working-directory: ${{ github.workspace }}

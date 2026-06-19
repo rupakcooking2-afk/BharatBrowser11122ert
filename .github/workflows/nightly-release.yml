@@ -1,0 +1,221 @@
+name: Nightly Release Build
+
+# Manual UNSIGNED release builds of Bharat Browser for all three platforms on
+# GitHub-hosted runners. Signing is intentionally not wired up; see
+# packages/browseros/build/docs/nightly-warpbuild-ci.md for the design.
+#
+# The pinned chromium checkout (packages/browseros/CHROMIUM_VERSION) is
+# fetched fresh each run because GitHub-hosted runner disk space and
+# actions/cache (10 GB limit) cannot hold the full Chromium tree (~30 GB).
+# Each build pays the checkout + gclient sync cost once.
+#
+# Optional R2 secrets: when configured, server binary bundles are downloaded
+# from R2 and build artifacts are uploaded to R2. Without R2 secrets the
+# build still works (no resource downloads, no artifact upload).
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: Platforms to build
+        type: choice
+        default: all
+        options:
+          - all
+          - linux
+          - windows
+          - macos
+      publish_nightly:
+        description: Update the rolling `nightly` prerelease (main only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - name: Resolve build matrix and publish flag
+        id: plan
+        env:
+          PLATFORMS: ${{ inputs.platforms || 'all' }}
+          PUBLISH_INPUT: ${{ inputs.publish_nightly }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          matrix='[
+            {"platform":"linux","arch":"x64","runner":"ubuntu-latest","config":"release.linux.ci.yaml","timeout":420},
+            {"platform":"windows","arch":"x64","runner":"windows-latest","config":"release.windows.ci.yaml","timeout":780},
+            {"platform":"macos","arch":"arm64","runner":"macos-latest","config":"release.macos.arm64.ci.yaml","timeout":720}
+          ]'
+          if [ "$PLATFORMS" != "all" ]; then
+            matrix="$(jq -c --arg p "$PLATFORMS" '[ .[] | select(.platform == $p) ]' <<<"$matrix")"
+          else
+            matrix="$(jq -c . <<<"$matrix")"
+          fi
+
+          publish="false"
+          if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
+            if [ "$PUBLISH_INPUT" = "true" ]; then
+              publish="true"
+            fi
+          fi
+
+          {
+            echo "matrix=$matrix"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: build (${{ matrix.platform }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v8.2.0
+
+      - name: Resolve chromium pin and paths
+        id: pin
+        run: |
+          set -euo pipefail
+          . packages/browseros/CHROMIUM_VERSION
+          version="$MAJOR.$MINOR.$BUILD.$PATCH"
+
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            parent="$(cd "$GITHUB_WORKSPACE/.." && pwd -W)"
+          else
+            parent="$(cd "$GITHUB_WORKSPACE/.." && pwd)"
+          fi
+
+          {
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "CHROMIUM_ROOT=$parent/chromium"
+            echo "CHROMIUM_SRC=$parent/chromium/src"
+          } >> "$GITHUB_ENV"
+
+      - name: Ensure chromium checkout at pinned tag
+        run: |
+          set -euo pipefail
+          uv run --project packages/browseros python scripts/ci/setup_chromium.py \
+            --chromium-root "$CHROMIUM_ROOT" --step checkout
+
+      - name: Reset chromium tree (clean module)
+        working-directory: packages/browseros
+        run: |
+          set -euo pipefail
+          uv run browseros build --modules clean \
+            --chromium-src "$CHROMIUM_SRC" \
+            --build-type release \
+            --arch "${{ matrix.arch }}"
+
+      - name: Sync chromium dependencies (gclient)
+        run: |
+          set -euo pipefail
+          uv run --project packages/browseros python scripts/ci/setup_chromium.py \
+            --chromium-root "$CHROMIUM_ROOT" --step sync
+
+      - name: Install Linux build deps
+        if: matrix.platform == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libfuse2
+          "$CHROMIUM_SRC/build/install-build-deps.sh" --no-prompt
+
+      - name: Build Bharat Browser (unsigned)
+        working-directory: packages/browseros
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          uv run browseros build \
+            --config "build/config/${{ matrix.config }}" \
+            --chromium-src "$CHROMIUM_SRC"
+
+      - name: Report disk usage
+        if: always()
+        run: df -h || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bharat-browser-nightly-${{ matrix.platform }}-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          path: |
+            packages/browseros/releases/*/*.dmg
+            packages/browseros/releases/*/*.AppImage
+            packages/browseros/releases/*/*.deb
+            packages/browseros/releases/*/*_installer.exe
+            packages/browseros/releases/*/*_installer.zip
+
+  publish:
+    needs: [plan, build]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Update rolling nightly prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*/*.dmg dist/*/*.AppImage dist/*/*.deb dist/*/*_installer.exe dist/*/*_installer.zip dist/*.dmg dist/*.AppImage dist/*.deb dist/*_installer.exe dist/*_installer.zip)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::No artifacts found to publish"
+            exit 1
+          fi
+          printf 'Publishing:\n%s\n' "${files[@]}"
+
+          notes_file="$(mktemp)"
+          cat > "$notes_file" <<EOF
+          Automated unsigned nightly build from \`main\` (commit $GITHUB_SHA).
+
+          These artifacts are NOT code signed or notarized — expect OS warnings on install. For signed builds use the regular releases.
+          EOF
+
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly \
+            --prerelease \
+            --latest=false \
+            --target "$GITHUB_SHA" \
+            --title "Bharat Browser Nightly (unsigned) $(date -u +%Y-%m-%d)" \
+            --notes-file "$notes_file" \
+            "${files[@]}"

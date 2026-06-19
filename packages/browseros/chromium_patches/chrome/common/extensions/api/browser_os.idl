@@ -1,0 +1,182 @@
+diff --git a/chrome/common/extensions/api/browser_os.idl b/chrome/common/extensions/api/browser_os.idl
+new file mode 100644
+index 0000000000000..c6044b5071033
+--- /dev/null
++++ b/chrome/common/extensions/api/browser_os.idl
+@@ -0,0 +1,176 @@
++// Copyright 2024 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// browserOS API for accessing system-level browser functionality
++namespace browserOS {
++
++  // Selection type for choosePath.
++  // file: Only files can be selected (default).
++  // folder: Only folders/directories can be selected.
++  enum SelectionType {
++    file,
++    folder
++  };
++
++  // Options for choosePath
++  dictionary ChoosePathOptions {
++    // Restrict what can be selected.
++    // Default: file
++    SelectionType? type;
++
++    // Title displayed in the dialog window.
++    // Default: OS-provided default title
++    DOMString? title;
++
++    // Starting directory for the dialog.
++    // If invalid or not provided, falls back to OS default.
++    DOMString? startingDirectory;
++  };
++
++  // Result from choosePath
++  dictionary SelectedPath {
++    // Full absolute path (e.g., "/Users/user/projects/myapp")
++    DOMString path;
++
++    // File or folder name (e.g., "myapp")
++    DOMString name;
++  };
++
++  // Page load status information
++  dictionary PageLoadStatus {
++    boolean isResourcesLoading;
++    boolean isDOMContentLoaded;
++    boolean isPageComplete;
++  };
++
++  // Standard response for all interaction methods
++  dictionary InteractionResponse {
++    boolean success;
++  };
++
++  callback InteractionCallback = void(InteractionResponse response);
++  callback GetPageLoadStatusCallback = void(PageLoadStatus status);
++
++  // Settings-related types
++  dictionary PrefObject {
++    DOMString key;
++    DOMString type;
++    any value;
++  };
++
++  // Callback for settings functions
++  callback GetPrefCallback = void(PrefObject pref);
++  callback SetPrefCallback = void(boolean success);
++  callback GetAllPrefsCallback = void(PrefObject[] prefs);
++
++  // Callback for metrics logging
++  callback VoidCallback = void();
++
++  // Callback for getting version number
++  callback GetVersionNumberCallback = void(DOMString version);
++
++  // Callback for executeJavaScript
++  callback ExecuteJavaScriptCallback = void(any result);
++
++  // Callback for choosePath.
++  // |result|: Selected path info, or null if user cancelled.
++  callback ChoosePathCallback = void(optional SelectedPath result);
++
++  interface Functions {
++    // Gets the page load status for a tab
++    // |tabId|: The tab to check. Defaults to active tab.
++    // |callback|: Called with the page load status.
++    static void getPageLoadStatus(
++        optional long tabId,
++        GetPageLoadStatusCallback callback);
++
++    // Clicks at specific coordinates on the page
++    // |tabId|: The tab to click in. Defaults to active tab.
++    // |x|: X coordinate in CSS pixels from viewport origin.
++    // |y|: Y coordinate in CSS pixels from viewport origin.
++    // |callback|: Called when the click is complete.
++    static void clickCoordinates(
++        optional long tabId,
++        double x,
++        double y,
++        InteractionCallback callback);
++
++    // Types text after clicking at coordinates to focus element
++    // |tabId|: The tab to type in. Defaults to active tab.
++    // |x|: X coordinate to click for focus.
++    // |y|: Y coordinate to click for focus.
++    // |text|: Text to type after focusing.
++    // |callback|: Called when the operation is complete.
++    static void typeAtCoordinates(
++        optional long tabId,
++        double x,
++        double y,
++        DOMString text,
++        InteractionCallback callback);
++
++    // Settings API functions - compatible with chrome.settingsPrivate
++    // Gets a specific preference value
++    // |name|: The preference name (e.g., "nxtscape.default_provider").
++    // |callback|: Called with the preference object.
++    static void getPref(
++        DOMString name,
++        GetPrefCallback callback);
++
++    // Sets a specific preference value
++    // |name|: The preference name (e.g., "nxtscape.default_provider").
++    // |value|: The value to set.
++    // |pageId|: Optional page ID for settings tracking (can be empty string).
++    // |callback|: Called with success status.
++    static void setPref(
++        DOMString name,
++        any value,
++        optional DOMString pageId,
++        SetPrefCallback callback);
++
++    // Gets all preferences (filtered to nxtscape.* prefs)
++    // |callback|: Called with array of preference objects.
++    static void getAllPrefs(
++        GetAllPrefsCallback callback);
++
++    // Logs a metric event with optional properties
++    // |eventName|: The name of the event to log (e.g., "extension.action").
++    // |properties|: Optional JSON object with additional properties.
++    // |callback|: Called when the metric is logged.
++    static void logMetric(
++        DOMString eventName,
++        optional object properties,
++        optional VoidCallback callback);
++
++    // Gets the browser version number
++    // |callback|: Called with the version string.
++    static void getVersionNumber(
++        GetVersionNumberCallback callback);
++
++    // Gets the BrowserOS version number
++    // |callback|: Called with the version string.
++    static void getBrowserosVersionNumber(
++        GetVersionNumberCallback callback);
++
++    // Executes JavaScript code in the specified tab
++    // |tabId|: The tab to execute JavaScript in. Defaults to active tab.
++    // |code|: The JavaScript code to execute.
++    // |callback|: Called with the result of the execution.
++    static void executeJavaScript(
++        optional long tabId,
++        DOMString code,
++        ExecuteJavaScriptCallback callback);
++
++    // Opens a native OS file/folder picker dialog.
++    // Returns the selected path or null if the user cancels.
++    //
++    // |options|: Configuration for the picker dialog.
++    // |callback|: Called with the result.
++    //
++    // Errors:
++    // - "Could not show file dialog" if no browser window context available
++    static void choosePath(
++        optional ChoosePathOptions options,
++        ChoosePathCallback callback);
++  };
++};

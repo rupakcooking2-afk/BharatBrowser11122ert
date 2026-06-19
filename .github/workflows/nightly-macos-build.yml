@@ -1,0 +1,198 @@
+name: Nightly macOS Build
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump level
+        type: choice
+        default: offset+build
+        options:
+          - offset-only
+          - offset+build
+          - offset+patch
+          - none
+      commit_version:
+        description: Commit and push the version bump to the built branch
+        type: boolean
+        default: false
+      upload_to_r2:
+        description: Publish build to R2/CDN after packaging
+        type: boolean
+        default: false
+      release_server:
+        description: Build and upload server artifacts before packaging
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-build
+  cancel-in-progress: false
+
+jobs:
+  resolve_inputs:
+    runs-on: ubuntu-latest
+    outputs:
+      target_ref: ${{ steps.workflow_inputs.outputs.target_ref }}
+      bump_mode: ${{ steps.workflow_inputs.outputs.bump_mode }}
+      commit_version: ${{ steps.workflow_inputs.outputs.commit_version }}
+      upload_to_r2: ${{ steps.workflow_inputs.outputs.upload_to_r2 }}
+      release_server: ${{ steps.workflow_inputs.outputs.release_server }}
+      server_version: ${{ steps.server_version.outputs.server_version }}
+    steps:
+      - name: Resolve workflow inputs
+        id: workflow_inputs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_BUMP: ${{ inputs.bump }}
+          DISPATCH_COMMIT_VERSION: ${{ inputs.commit_version }}
+          DISPATCH_UPLOAD_TO_R2: ${{ inputs.upload_to_r2 }}
+          DISPATCH_RELEASE_SERVER: ${{ inputs.release_server }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            target_ref="$DEFAULT_BRANCH"
+            bump_mode="offset+build"
+            commit_version="true"
+            upload_to_r2="false"
+            release_server="false"
+          else
+            target_ref="$DISPATCH_REF"
+            bump_mode="${DISPATCH_BUMP:-offset+build}"
+            commit_version="${DISPATCH_COMMIT_VERSION:-false}"
+            upload_to_r2="${DISPATCH_UPLOAD_TO_R2:-false}"
+            release_server="${DISPATCH_RELEASE_SERVER:-false}"
+          fi
+
+          {
+            echo "target_ref=$target_ref"
+            echo "bump_mode=$bump_mode"
+            echo "commit_version=$commit_version"
+            echo "upload_to_r2=$upload_to_r2"
+            echo "release_server=$release_server"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.workflow_inputs.outputs.target_ref }}
+
+      - name: Read server package version
+        id: server_version
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+
+          package_json = Path("packages/browseros-agent/apps/server/package.json")
+          version = json.loads(package_json.read_text())["version"]
+          print(f"server_version={version}")
+          PY
+
+  release_server:
+    needs: [resolve_inputs]
+    if: |
+      always() &&
+      needs.resolve_inputs.result == 'success' &&
+      needs.resolve_inputs.outputs.release_server == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-server.yml
+    with:
+      version: ${{ needs.resolve_inputs.outputs.server_version }}
+      apply_bump: ${{ needs.resolve_inputs.outputs.bump_mode != 'none' }}
+      targets: darwin-arm64
+      publish_github_release: false
+    secrets: inherit
+
+  build:
+    needs: [resolve_inputs, release_server]
+    if: |
+      always() &&
+      needs.resolve_inputs.result == 'success' &&
+      (needs.resolve_inputs.outputs.release_server != 'true' || needs.release_server.result == 'success')
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    timeout-minutes: 600
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve_inputs.outputs.target_ref }}
+
+      - uses: astral-sh/setup-uv@v8.2.0
+
+      - name: Resolve chromium pin and paths
+        id: pin
+        run: |
+          set -euo pipefail
+          . packages/browseros/CHROMIUM_VERSION
+          version="$MAJOR.$MINOR.$BUILD.$PATCH"
+
+          parent="$(cd "$GITHUB_WORKSPACE/.." && pwd)"
+
+          {
+            echo "version=$version"
+            echo "CHROMIUM_ROOT=$parent/chromium"
+            echo "CHROMIUM_SRC=$parent/chromium/src"
+          } >> "$GITHUB_ENV"
+
+      - name: Bump version
+        id: bump
+        run: |
+          set -euo pipefail
+          uv run --project packages/browseros python build/scripts/bump_version.py \
+            --mode "${{ needs.resolve_inputs.outputs.bump_mode }}"
+          version="$(cat packages/browseros/resources/BROWSEROS_VERSION)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Built version: $version"
+
+      - name: Ensure chromium checkout at pinned tag
+        run: |
+          set -euo pipefail
+          uv run --project packages/browseros python scripts/ci/setup_chromium.py \
+            --chromium-root "$CHROMIUM_ROOT" --step checkout
+
+      - name: Reset chromium tree (clean module)
+        working-directory: packages/browseros
+        run: |
+          set -euo pipefail
+          uv run browseros build --modules clean \
+            --chromium-src "$CHROMIUM_SRC" \
+            --build-type release \
+            --arch arm64
+
+      - name: Sync chromium dependencies (gclient)
+        run: |
+          set -euo pipefail
+          uv run --project packages/browseros python scripts/ci/setup_chromium.py \
+            --chromium-root "$CHROMIUM_ROOT" --step sync
+
+      - name: Build Bharat Browser (macOS arm64)
+        working-directory: packages/browseros
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          config="build/config/release.macos.arm64.noupload.yaml"
+          uv run browseros build --config "$config" --chromium-src "$CHROMIUM_SRC"
+
+      - name: Upload DMG artifact
+        if: ${{ always() && steps.bump.outputs.version != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: BharatBrowser_v${{ steps.bump.outputs.version }}_arm64
+          path: packages/browseros/releases/${{ steps.bump.outputs.version }}/*.dmg
+          retention-days: 14
+          if-no-files-found: warn

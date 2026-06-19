@@ -1,0 +1,4 @@
+[submodule ".internal-docs"]
+	path = .internal-docs
+	url = git@github.com:browseros-ai/internal-docs.git
+	branch = main

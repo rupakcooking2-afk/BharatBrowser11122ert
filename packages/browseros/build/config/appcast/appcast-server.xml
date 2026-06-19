@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+  <channel>
+    <title>Bharat Browser Server</title>
+    <link>https://cdn.bharatbrowser.com/appcast-server.xml</link>
+    <description>Bharat Browser Server binary updates</description>
+    <language>en</language>
+  </channel>
+</rss>

@@ -1,0 +1,13 @@
+diff --git a/components/search/ntp_features.cc b/components/search/ntp_features.cc
+index eecd80f66fbbe..fc9d1907b071e 100644
+--- a/components/search/ntp_features.cc
++++ b/components/search/ntp_features.cc
+@@ -197,7 +197,7 @@ BASE_FEATURE(kNtpNextFeatures, base::FEATURE_DISABLED_BY_DEFAULT);
+ BASE_FEATURE(kNtpOneGoogleBarAsyncBarParts, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+ // If enabled, a footer will show on the NTP.
+-BASE_FEATURE(kNtpFooter, base::FEATURE_ENABLED_BY_DEFAULT);
++BASE_FEATURE(kNtpFooter, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+ // If enabled, tab groups module will be shown.
+ BASE_FEATURE(kNtpTabGroupsModule,

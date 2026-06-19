@@ -1,0 +1,13 @@
+diff --git a/chrome/browser/ui/toolbar/pinned_toolbar/BUILD.gn b/chrome/browser/ui/toolbar/pinned_toolbar/BUILD.gn
+index 895f727d5141c..d97e78d1da9f7 100644
+--- a/chrome/browser/ui/toolbar/pinned_toolbar/BUILD.gn
++++ b/chrome/browser/ui/toolbar/pinned_toolbar/BUILD.gn
+@@ -39,6 +39,8 @@ source_set("impl") {
+     ]
+     deps = [
+       "//chrome/browser:primitives",
++      "//chrome/browser/browseros/core:action_utils",
++      "//chrome/browser/browseros/core:prefs",
+       "//chrome/browser/translate",
+       "//chrome/browser/ui:tab_search_feature",
+       "//chrome/browser/ui:ui_features",

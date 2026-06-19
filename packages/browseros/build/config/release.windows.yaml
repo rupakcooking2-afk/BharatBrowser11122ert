@@ -1,0 +1,44 @@
+# Bharat Browser Windows Release Build Configuration
+#
+# Environment Variables:
+#   Use !env tag to reference environment variables:
+#     Example: chromium_src: !env CHROMIUM_SRC
+
+build:
+  type: release
+  architecture: x64 # Windows builds are typically x64
+
+gn_flags:
+  file: build/config/gn/flags.windows.release.gn
+
+# Explicit module execution order
+modules:
+  # Phase 1: Setup
+  - clean
+  - git_setup
+  #- winsparkle_setup
+
+  # Phase 2: Patches & Resources
+  - download_resources
+  - resources
+  - bundled_extensions
+  - chromium_replace
+  - string_replaces
+  - series_patches
+  - patches
+
+  # Phase 3: Build
+  - configure
+  - compile
+
+  # Phase 4: Package (mini_installer is built inside sign_windows in signed
+  # release mode; unsigned builds need the standalone mini_installer module)
+  - mini_installer
+  - package_windows
+
+  # Phase 5: Upload (requires R2 credentials; skipped if not configured)
+  - upload
+
+# Notification settings
+notifications:
+  slack: true

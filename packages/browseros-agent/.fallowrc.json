@@ -1,0 +1,96 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+  "entry": [
+    "apps/server/src/index.ts",
+    "apps/agent/entrypoints/app/main.tsx",
+    "apps/agent/entrypoints/sidepanel/main.tsx",
+    "apps/agent/entrypoints/background/index.ts",
+    "apps/agent/entrypoints/content.ts",
+    "apps/agent/entrypoints/auth.content/index.ts",
+    "apps/agent/entrypoints/glow.content/index.ts",
+    "apps/agent/entrypoints/selection.content.ts",
+    "scripts/run-bun-test.ts",
+    "scripts/dev/inspect-ui.ts",
+    "scripts/patch-windows-exe.ts",
+    "apps/eval/scripts/generate-report.ts",
+    "apps/eval/scripts/weekly-report.ts"
+  ],
+  "ignoreDependencies": [
+    "tailwind-scrollbar-hide",
+    "tw-animate-css",
+    "@tailwindcss/typography",
+    "pino-pretty",
+    "dotenv",
+    "picocolors",
+    "@browseros/cdp-protocol",
+    "@graphql-typed-document-node/core"
+  ],
+  "ignoreUnresolvedImports": [
+    "@/assets/**",
+    "@/generated/graphql/**",
+    "@/styles/global.css"
+  ],
+  "ignorePatterns": [
+    "**/*.d.ts",
+    "**/dist/**",
+    "**/node_modules/**",
+    "**/*.css",
+    "**/.wxt/**",
+    "**/.output/**",
+    "**/coverage/**",
+    "**/tmp/**",
+    "apps/agent/schema/**",
+    "apps/cli/**",
+    "apps/agent/assets/**",
+    "apps/agent/generated/**",
+    "apps/eval/data/**",
+    "apps/server/src/lib/db/migrations/**",
+    "packages/cdp-protocol/src/generated/**",
+    ".agents/skills/**",
+    ".claude/skills/**"
+  ],
+  "rules": {
+    "unused-files": "warn",
+    "unused-exports": "warn",
+    "unused-types": "warn",
+    "unused-dependencies": "warn",
+    "unused-dev-dependencies": "warn",
+    "unused-optional-dependencies": "warn",
+    "unused-enum-members": "warn",
+    "private-type-leaks": "warn",
+    "unresolved-imports": "warn",
+    "unlisted-dependencies": "warn",
+    "circular-dependencies": "warn",
+    "unused-class-members": "off",
+    "duplicate-exports": "off"
+  },
+  "overrides": [
+    {
+      "files": [
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/*.spec.ts",
+        "**/*.spec.tsx",
+        "**/tests/**",
+        "**/*.config.ts",
+        "**/codegen.ts"
+      ],
+      "rules": {
+        "unused-exports": "off",
+        "unused-files": "off"
+      }
+    },
+    {
+      "files": [
+        "apps/agent/components/ui/**",
+        "apps/agent/components/ai-elements/**"
+      ],
+      "rules": {
+        "unused-exports": "off",
+        "unused-files": "off",
+        "unused-types": "off",
+        "private-type-leaks": "off"
+      }
+    }
+  ]
+}

@@ -1,0 +1,358 @@
+/**
+ * @license
+ * Copyright 2025 BrowserOS
+ *
+ * Server configuration loading with multiple sources.
+ * Precedence: CLI > Config File > Environment > Defaults
+ */
+import fs from 'node:fs'
+import path from 'node:path'
+
+import { Command, InvalidArgumentError } from 'commander'
+import { z } from 'zod'
+
+import { INLINED_ENV, REQUIRED_FOR_PRODUCTION } from './env'
+import { VERSION } from './version'
+
+const portSchema = z.number().int()
+
+const ServerConfigSchema = z.object({
+  cdpPort: portSchema.nullable(),
+  serverPort: portSchema,
+  agentPort: portSchema,
+  extensionPort: portSchema.nullable(),
+  resourcesDir: z.string(),
+  executionDir: z.string(),
+  mcpAllowRemote: z.boolean(),
+  instanceClientId: z.string().optional(),
+  instanceInstallId: z.string().optional(),
+  instanceBrowserosVersion: z.string().optional(),
+  instanceChromiumVersion: z.string().optional(),
+  aiSdkDevtoolsEnabled: z.boolean(),
+  browserUseNewTools: z.boolean(),
+})
+
+export type ServerConfig = z.infer<typeof ServerConfigSchema>
+
+type PartialConfig = Partial<z.input<typeof ServerConfigSchema>>
+
+export type ConfigResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: string }
+
+interface ParsedCliArgs {
+  configPath?: string
+  cwd: string
+  overrides: PartialConfig
+}
+
+/** Loads and validates server config from CLI, file, env, and defaults. */
+export function loadServerConfig(
+  argv: string[] = process.argv,
+): ConfigResult<ServerConfig> {
+  const cli = parseCliArgs(argv)
+  if (!cli.ok) return cli
+
+  const file = parseConfigFile(cli.value.configPath)
+  if (!file.ok) return file
+
+  const runtimeEnv = parseRuntimeEnv()
+  if (!runtimeEnv.ok) return runtimeEnv
+
+  const merged = mergeConfigs(
+    getDefaults(cli.value.cwd),
+    runtimeEnv.value,
+    file.value,
+    cli.value.overrides,
+  )
+
+  merged.agentPort = merged.serverPort
+
+  const result = ServerConfigSchema.safeParse(merged)
+  if (!result.success) {
+    const errors = result.error.issues
+      .map((i) => `  - ${i.path.join('.')}: ${i.message}`)
+      .join('\n')
+    return {
+      ok: false,
+      error: `Invalid server configuration:\n${errors}\n\nProvide via --config, CLI flags, or environment variables.`,
+    }
+  }
+
+  const inlinedValidation = validateInlinedEnv()
+  if (!inlinedValidation.ok) return inlinedValidation
+
+  return { ok: true, value: result.data }
+}
+
+function parseCliArgs(argv: string[]): ConfigResult<ParsedCliArgs> {
+  const program = new Command()
+
+  try {
+    program
+      .name('browseros-server')
+      .description('BrowserOS Unified Server - MCP + Agent')
+      .version(VERSION)
+      .option('--config <path>', 'Path to JSON configuration file')
+      .option(
+        '--cdp-port <port>',
+        'CDP WebSocket port (optional)',
+        parsePortArg,
+      )
+      .option('--server-port <port>', 'Server HTTP port', parsePortArg)
+      .option(
+        '--http-mcp-port <port>',
+        '[DEPRECATED] Use --server-port',
+        parsePortArg,
+      )
+      .option(
+        '--agent-port <port>',
+        '[DEPRECATED] Use --server-port',
+        parsePortArg,
+      )
+      .option(
+        '--extension-port <port>',
+        '[DEPRECATED] No-op, kept for backwards compatibility',
+        parsePortArg,
+      )
+      .option('--resources-dir <path>', 'Resources directory path')
+      .option(
+        '--execution-dir <path>',
+        'Execution directory for logs and configs',
+      )
+      .option(
+        '--allow-remote-in-mcp',
+        'Allow non-localhost MCP connections',
+        false,
+      )
+      .option(
+        '--disable-mcp-server',
+        '[DEPRECATED] No-op, kept for backwards compatibility',
+      )
+      .exitOverride((err) => {
+        if (err.exitCode === 0) {
+          process.exit(0)
+        }
+        throw err
+      })
+      .parse(argv)
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: message }
+  }
+
+  const opts = program.opts()
+
+  if (opts.httpMcpPort !== undefined) {
+    console.warn('Warning: --http-mcp-port is deprecated. Use --server-port.')
+  }
+
+  if (opts.agentPort !== undefined) {
+    console.warn(
+      'Warning: --agent-port is deprecated and has no effect. Use --server-port.',
+    )
+  }
+
+  if (opts.extensionPort !== undefined) {
+    console.warn('Warning: --extension-port is deprecated and has no effect.')
+  }
+
+  const cwd = process.cwd()
+
+  return {
+    ok: true,
+    value: {
+      configPath: opts.config,
+      cwd,
+      overrides: omitUndefined({
+        cdpPort: opts.cdpPort,
+        serverPort: opts.serverPort ?? opts.httpMcpPort,
+        extensionPort: opts.extensionPort,
+        resourcesDir: opts.resourcesDir
+          ? toAbsolutePath(opts.resourcesDir, cwd)
+          : undefined,
+        executionDir: opts.executionDir
+          ? toAbsolutePath(opts.executionDir, cwd)
+          : undefined,
+        mcpAllowRemote: opts.allowRemoteInMcp || undefined,
+      }),
+    },
+  }
+}
+
+function parsePortArg(value: string): number {
+  const port = parseInt(value, 10)
+  if (Number.isNaN(port)) {
+    throw new InvalidArgumentError('Not a valid port number')
+  }
+  return port
+}
+
+function parseConfigFile(filePath?: string): ConfigResult<PartialConfig> {
+  if (!filePath) {
+    return { ok: true, value: {} }
+  }
+
+  const absPath = path.isAbsolute(filePath)
+    ? filePath
+    : path.resolve(process.cwd(), filePath)
+
+  if (!fs.existsSync(absPath)) {
+    return { ok: false, error: `Config file not found: ${absPath}` }
+  }
+
+  try {
+    const content = fs.readFileSync(absPath, 'utf-8')
+    const cfg = JSON.parse(content)
+    const configDir = path.dirname(absPath)
+
+    return {
+      ok: true,
+      value: omitUndefined({
+        cdpPort: cfg.ports?.cdp,
+        serverPort: cfg.ports?.server ?? cfg.ports?.http_mcp,
+        extensionPort: cfg.ports?.extension,
+        resourcesDir: parseAbsolutePath(cfg.directories?.resources, configDir),
+        executionDir: parseAbsolutePath(cfg.directories?.execution, configDir),
+        mcpAllowRemote:
+          cfg.flags?.allow_remote_in_mcp === true ? true : undefined,
+        aiSdkDevtoolsEnabled:
+          cfg.flags?.ai_sdk_devtools === true ? true : undefined,
+        instanceClientId:
+          typeof cfg.instance?.client_id === 'string'
+            ? cfg.instance.client_id
+            : undefined,
+        instanceInstallId:
+          typeof cfg.instance?.install_id === 'string'
+            ? cfg.instance.install_id
+            : undefined,
+        instanceBrowserosVersion:
+          typeof cfg.instance?.browseros_version === 'string'
+            ? cfg.instance.browseros_version
+            : undefined,
+        instanceChromiumVersion:
+          typeof cfg.instance?.chromium_version === 'string'
+            ? cfg.instance.chromium_version
+            : undefined,
+      }),
+    }
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Config file error: ${message}` }
+  }
+}
+
+function parseRuntimeEnv(): ConfigResult<PartialConfig> {
+  const cwd = process.cwd()
+  const browserUseNewTools = parseBooleanEnv(
+    'BROWSER_USE_NEW_TOOLS',
+    process.env.BROWSER_USE_NEW_TOOLS,
+  )
+  if (!browserUseNewTools.ok) return browserUseNewTools
+
+  return {
+    ok: true,
+    value: omitUndefined({
+      cdpPort: process.env.BROWSEROS_CDP_PORT
+        ? safeParseInt(process.env.BROWSEROS_CDP_PORT)
+        : undefined,
+      serverPort: process.env.BROWSEROS_SERVER_PORT
+        ? safeParseInt(process.env.BROWSEROS_SERVER_PORT)
+        : undefined,
+      extensionPort: process.env.BROWSEROS_EXTENSION_PORT
+        ? safeParseInt(process.env.BROWSEROS_EXTENSION_PORT)
+        : undefined,
+      resourcesDir: process.env.BROWSEROS_RESOURCES_DIR
+        ? toAbsolutePath(process.env.BROWSEROS_RESOURCES_DIR, cwd)
+        : undefined,
+      executionDir: process.env.BROWSEROS_EXECUTION_DIR
+        ? toAbsolutePath(process.env.BROWSEROS_EXECUTION_DIR, cwd)
+        : undefined,
+      instanceInstallId: process.env.BROWSEROS_INSTALL_ID,
+      instanceClientId: process.env.BROWSEROS_CLIENT_ID,
+      aiSdkDevtoolsEnabled:
+        process.env.BROWSEROS_AI_SDK_DEVTOOLS === 'true' ? true : undefined,
+      browserUseNewTools: browserUseNewTools.value,
+    }),
+  }
+}
+
+function validateInlinedEnv(): ConfigResult<void> {
+  if (process.env.NODE_ENV !== 'production') {
+    return { ok: true, value: undefined }
+  }
+
+  const missing: string[] = []
+  for (const varName of REQUIRED_FOR_PRODUCTION) {
+    if (!INLINED_ENV[varName]) {
+      missing.push(varName)
+    }
+  }
+
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      error: `Missing required environment variables for production:\n${missing.map((v) => `  - ${v}`).join('\n')}`,
+    }
+  }
+
+  return { ok: true, value: undefined }
+}
+
+function getDefaults(cwd: string): PartialConfig {
+  return {
+    cdpPort: null,
+    extensionPort: null,
+    resourcesDir: cwd,
+    executionDir: cwd,
+    mcpAllowRemote: false,
+    aiSdkDevtoolsEnabled: false,
+    browserUseNewTools: false,
+  }
+}
+
+function mergeConfigs(...configs: PartialConfig[]): PartialConfig {
+  const result: PartialConfig = {}
+  for (const config of configs) {
+    for (const [key, value] of Object.entries(config)) {
+      if (value !== undefined) {
+        ;(result as Record<string, unknown>)[key] = value
+      }
+    }
+  }
+  return result
+}
+
+function safeParseInt(value: string): number | undefined {
+  const num = parseInt(value, 10)
+  return Number.isNaN(num) ? undefined : num
+}
+
+/** Parses a strict boolean env var, defaulting missing values to false. */
+function parseBooleanEnv(
+  envName: string,
+  value: string | undefined,
+): ConfigResult<boolean> {
+  if (value === undefined) return { ok: true, value: false }
+  if (value === 'true') return { ok: true, value: true }
+  if (value === 'false') return { ok: true, value: false }
+  return {
+    ok: false,
+    error: `${envName} must be "true" or "false".`,
+  }
+}
+
+function omitUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(obj).filter(([_, v]) => v !== undefined),
+  ) as Partial<T>
+}
+
+function toAbsolutePath(target: string, baseDir: string): string {
+  return path.isAbsolute(target) ? target : path.resolve(baseDir, target)
+}
+
+function parseAbsolutePath(val: unknown, baseDir: string): string | undefined {
+  if (typeof val !== 'string') return undefined
+  return toAbsolutePath(val, baseDir)
+}

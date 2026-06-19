@@ -1,0 +1,12 @@
+diff --git a/chrome/utility/BUILD.gn b/chrome/utility/BUILD.gn
+index fd1fac51fe132..8b03e4157cc1b 100644
+--- a/chrome/utility/BUILD.gn
++++ b/chrome/utility/BUILD.gn
+@@ -107,6 +107,7 @@ static_library("utility") {
+         "importer/firefox_importer.cc",
+         "importer/firefox_importer.h",
+       ]
++      deps += [ "//chrome/utility/importer/browseros" ]
+     }
+     if (is_mac) {
+       sources += [

@@ -1,0 +1,12 @@
+diff --git a/third_party/libxml/BUILD.gn b/third_party/libxml/BUILD.gn
+index 890afc0e83a92..a7b55708e3f42 100644
+--- a/third_party/libxml/BUILD.gn
++++ b/third_party/libxml/BUILD.gn
+@@ -81,6 +81,7 @@ static_library("xml_reader") {
+   # Security Team.
+   visibility = [
+     "//base/test:test_support",
++    "//chrome/browser/browseros/server:server",
+     "//components/policy/core/common:unit_tests",
+ 
+     # For parsing trusted data from Google origins with public key pinning only.
