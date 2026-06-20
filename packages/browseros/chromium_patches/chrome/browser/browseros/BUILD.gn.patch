@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000000000..a7e89ea2d1c47
 --- /dev/null
 +++ b/chrome/browser/browseros/BUILD.gn
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,22 @@
 +# Copyright 2024 The Chromium Authors
 +# Use of this source code is governed by a BSD-style license that can be
 +# found in the LICENSE file.
@@ -12,11 +12,17 @@ index 0000000000000..a7e89ea2d1c47
 +# This groups together all BrowserOS-related code that lives under
 +# chrome/browser/browseros/.
 +
-+group("browseros_server_resources") {
++group("browseros") {
++  public_deps = [
++    ":browseros_server_resources",
++    ":browseros_bundled_extensions",
++  ]
 +}
 +
-+# Bundled extensions are copied separately to ensure they're available
-+# in the output directory at runtime.
++group("browseros_server_resources") {
++  public_deps = [ "//chrome/browser/browseros/server:browseros_server_resources" ]
++}
++
 +group("browseros_bundled_extensions") {
-+  deps = [ "//chrome/browser/browseros/bundled_extensions" ]
++  public_deps = [ "//chrome/browser/browseros/bundled_extensions" ]
 +}
