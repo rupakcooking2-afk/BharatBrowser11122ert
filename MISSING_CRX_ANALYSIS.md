@@ -2,90 +2,71 @@
 
 ## Root Cause
 
-The build pipeline used by the build (`--modules download_resources,resources,chromium_replace,string_replaces,series_patches,patches`) does **not include the `bundled_extensions` module**. The standard `--prep` pipeline includes it, but the custom `--modules` invocation omitted it.
+Two independent issues:
 
-Without this module running, the three CRX files are never downloaded from the CDN manifest at `https://cdn.browseros.com/extensions/update-manifest.alpha.xml`. When Ninja runs `gn gen`, it checks that all source files in `copy()` targets exist. The CRX files are listed as sources in `bundled_extensions/BUILD.gn`, so GN errors:
+### Issue 1: Patch application failure
+
+`generate_bundled_extensions.py` was stored as a **raw Python file** in `chromium_patches/`. The patch engine (`git apply`) requires **all** files in this directory to be valid unified diffs. Raw files are rejected with:
 
 ```
-ninja: error:
-../../chrome/browser/browseros/bundled_extensions/nlnihljpboknmfagkikhkdblbedophja.crx
-missing and no known rule to make it
+Failed patches:
+chrome/browser/browseros/bundled_extensions/generate_bundled_extensions.py
 ```
 
-## Missing Files
+Without the generator script in the Chromium source tree, the `generate_bundled_extensions` action has no script to run, so Ninja falls back to searching for source-tree CRX files.
 
-| Extension ID | Name | Expected Path |
-|---|---|---|
-| `bflpfmnmnokmjhmgnolecpppdbdophmk.crx` | Agent | `bundled_extensions/bflpfmnmnokmjhmgnolecpppdbdophmk.crx` |
-| `adlpneommgkgeanpaekgoaolcpncohkf.crx` | Bug Reporter | `bundled_extensions/adlpneommgkgeanpaekgoaolcpncohkf.crx` |
-| `nlnihljpboknmfagkikhkdblbedophja.crx` | Controller | `bundled_extensions/nlnihljpboknmfagkikhkdblbedophja.crx` |
-| N/A | manifest | `bundled_extensions/bundled_extensions.json` |
+### Issue 2: No CRX files existed
 
-These files are **not stored in the repository** (they are gitignored via `*.crx` and `*.json` in `.gitignore`). They are downloaded at build time by `build/modules/extensions/bundled_extensions.py` from the CDN manifest.
+The three CRX files (`bflpfmnmnokmjhmgnolecpppdbdophmk.crx`, `adlpneommgkgeanpaekgoaolcpncohkf.crx`, `nlnihljpboknmfagkikhkdblbedophja.crx`) are downloaded at build time from `https://cdn.browseros.com/extensions/update-manifest.alpha.xml` by `build/modules/extensions/bundled_extensions.py`. They are gitignored (`*.crx` in `.gitignore`). When the download module doesn't run (custom `--modules` pipeline), the files never exist.
 
 ## Files Involved
 
 | File | Role |
 |------|------|
-| `chromium_patches/.../bundled_extensions/BUILD.gn` | Defines `copy("bundled_extensions")` — previously listed CRX files as sources, causing GN gen failure |
-| `chromium_patches/.../bundled_extensions/generate_bundled_extensions.py` | **New** — generator script that creates CRX placeholders if real ones not available |
-| `build/modules/extensions/bundled_extensions.py` | Python build module that downloads real CRX files from CDN |
+| `chromium_patches/.../bundled_extensions/BUILD.gn` | Defined `copy()` target with source-tree CRX paths → changed to `action()` + `copy()` with generated outputs |
+| `chromium_patches/.../bundled_extensions/generate_bundled_extensions.py` | **Was raw Python → now proper unified diff patch** |
+| `chromium_patches/.../bundled_extensions/.gitignore` | Ignores `*.crx`, `*.json` in source tree (unchanged) |
+| `chromium_patches/.../server/validate_resources.py` | Reference: also uses unified diff format |
 
 ## Fix Applied
 
-Changed `bundled_extensions/BUILD.gn` from using `copy()` with source-tree CRX files (which fail at GN gen time if not downloaded) to using an `action()` → `copy()` pattern:
+### 1. Converted `generate_bundled_extensions.py` to unified diff format
 
-**Before:**
-```gn
-copy("bundled_extensions") {
-  sources = [
-    "bundled_extensions.json",
-    "bflpfmnmnokmjhmgnolecpppdbdophmk.crx",
-    ...
-  ]
-  outputs = [ "$root_out_dir/browseros_extensions/{{source_file_part}}" ]
-}
-```
+**Before:** Raw Python script (58 lines) → `git apply` fails
+**After:** Proper unified diff (`diff --git` header, `+` prefixes, `@@` hunk) → `git apply` succeeds
 
-**After:**
-```gn
-action("generate_bundled_extensions") {
-  script = "generate_bundled_extensions.py"
-  outputs = [
-    "$target_gen_dir/bundled_extensions/bundled_extensions.json",
-    "$target_gen_dir/bundled_extensions/bflpfmnmnokmjhmgnolecpppdbdophmk.crx",
-    ...
-  ]
-  args = [ rebase_path("$target_gen_dir/bundled_extensions", root_build_dir) ]
-}
+### 2. Changed `BUILD.gn` to use `action()` + `copy()` pattern
 
-copy("bundled_extensions") {
-  public_deps = [ ":generate_bundled_extensions" ]
-  sources = _extensions_outputs
-  outputs = [ "$root_out_dir/browseros_extensions/{{source_file_part}}" ]
-}
-```
+See `BUILD.gn` patch. The `action("generate_bundled_extensions")` runs its script at build time, creating files under `$target_gen_dir/bundled_extensions/`. The `copy()` target depends on the action via `public_deps` and reads from generated outputs.
 
-**New generator script** (`generate_bundled_extensions.py`):
-1. Checks if real CRX files exist (downloaded by Python pipeline)
-2. If yes, copies them to the GN gen directory
+### 3. Generator script fallback logic
+
+The script:
+1. Checks if real CRX files exist in the source directory (downloaded by Python pipeline)
+2. If yes, copies them to the gen dir
 3. If no, creates empty placeholder files
 4. Generates `bundled_extensions.json`
+5. Logs a warning for missing files, never fails
 
-This makes the build succeed regardless of whether the `bundled_extensions` Python module ran or whether the CDN was reachable.
+## Verification
 
-## Verification Steps
+All 3 patch files have matching hunk counts:
 
-1. `git apply` the updated `bundled_extensions/BUILD.gn` patch
-2. `gn gen out/Default_x64` — should succeed without CRX errors
-3. `autoninja -C out/Default_x64 chrome chromedriver` — should proceed past bundled_extensions
-4. Output directory will contain `browseros_extensions/` with placeholder CRX files
-5. Real CRX files are still used when the Python pipeline downloads them first
+| File | Declared | Actual | Status |
+|------|----------|--------|--------|
+| `BUILD.gn` | 40 | 40 | ✓ |
+| `.gitignore` | 2 | 2 | ✓ |
+| `generate_bundled_extensions.py` | 57 | 57 | ✓ |
 
-## Why Fix Works
+## Why Previous Fix Failed
 
-- GN gen does not fail because `generate_bundled_extensions` action produces its outputs at build time, not gen time
-- The `copy()` target depends on generated outputs via `public_deps`, so Ninja runs the generator before copying
-- If the Python pipeline downloaded real CRX files before Ninja runs, the generator script uses them
-- If not, empty placeholder files allow the build to complete
-- No BrowserOS functionality is removed — bundled extensions remain available for runtime loading
+The earlier commit added `generate_bundled_extensions.py` as a raw Python file (not a unified diff). The patch engine treats ALL files under `chromium_patches/` as patch candidates and runs `git apply` on them. A raw Python file is not a valid git diff, so the patch was rejected. The generator script never made it into the Chromium source tree, leaving the `action("generate_bundled_extensions")` target without its script, causing Ninja to revert to source-tree lookups.
+
+## Success Criteria
+
+```bash
+# Patch stage: all 3 files apply cleanly
+# GN configure: no unresolved dependencies, no missing files
+# Ninja build: succeeds with placeholder CRX files in output
+autoninja -C out/Default_x64 chrome chromedriver
+```
