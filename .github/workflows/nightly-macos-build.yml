@@ -135,11 +135,39 @@ jobs:
 
       - name: Configure ccache
         run: |
-          ccache --max-size 3G
-          ccache --set-config compiler_check=content
-          ccache --set-config no_hash_dir=true
-          ccache --set-config sloppiness=pch_defines,time_macros
-          ccache --zero-stats
+          echo "::group::ccache diagnostics"
+          ccache --version || echo "ccache not found"
+          which ccache || true
+          echo "::endgroup::"
+          # All config is set via CCACHE_* env vars. --max-size and
+          # --zero-stats are supported since ccache 3.x.
+          ccache --max-size 3G || true
+          ccache --zero-stats || true
+
+      - name: Set ccache env vars (job level)
+        run: |
+          {
+            echo "CCACHE_MAXSIZE=3G"
+            echo "CCACHE_COMPILERCHECK=content"
+            echo "CCACHE_NOHASHDIR=true"
+            echo "CCACHE_SLOPPINESS=pch_defines,time_macros"
+            echo "CCACHE_BASEDIR=${{ github.workspace }}"
+          } >> "$GITHUB_ENV"
+
+      - name: Resolve chromium pin and paths
+        id: pin
+        run: |
+          set -euo pipefail
+          . packages/browseros/CHROMIUM_VERSION
+          version="$MAJOR.$MINOR.$BUILD.$PATCH"
+
+          parent="$(cd "$GITHUB_WORKSPACE/.." && pwd)"
+
+          {
+            echo "version=$version"
+            echo "CHROMIUM_ROOT=$parent/chromium"
+            echo "CHROMIUM_SRC=$parent/chromium/src"
+          } >> "$GITHUB_ENV"
 
       - name: Cache ccache directory
         id: cache-ccache
@@ -156,21 +184,6 @@ jobs:
             ${{ env.CHROMIUM_ROOT }}/src/third_party
             ${{ env.CHROMIUM_ROOT }}/src/buildtools
           key: gclient-macos-arm64-${{ steps.pin.outputs.version }}-${{ hashFiles('packages/browseros/CHROMIUM_VERSION') }}
-
-      - name: Resolve chromium pin and paths
-        id: pin
-        run: |
-          set -euo pipefail
-          . packages/browseros/CHROMIUM_VERSION
-          version="$MAJOR.$MINOR.$BUILD.$PATCH"
-
-          parent="$(cd "$GITHUB_WORKSPACE/.." && pwd)"
-
-          {
-            echo "version=$version"
-            echo "CHROMIUM_ROOT=$parent/chromium"
-            echo "CHROMIUM_SRC=$parent/chromium/src"
-          } >> "$GITHUB_ENV"
 
       - name: Bump version
         id: bump

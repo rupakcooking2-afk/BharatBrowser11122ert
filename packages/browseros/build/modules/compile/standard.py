@@ -38,8 +38,8 @@ def log_ccache_stats() -> None:
                 line = line.strip()
                 if any(kw in line for kw in ("cache hit", "cache miss", "files in cache", "cache size")):
                     log_info(f"  ccache: {line}")
-    except FileNotFoundError:
-        pass  # ccache not installed
+    except (FileNotFoundError, AttributeError, OSError):
+        pass  # ccache not installed or unusable
 
 
 def _windows_total_memory_gb() -> Optional[float]:

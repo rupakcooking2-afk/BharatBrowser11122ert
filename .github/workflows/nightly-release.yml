@@ -38,6 +38,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # ccache config via env vars (supported in all ccache versions 3.x+)
   CCACHE_MAXSIZE: 3G
   CCACHE_COMPILERCHECK: content
   CCACHE_NOHASHDIR: "true"
@@ -105,23 +106,28 @@ jobs:
 
       - name: Install ccache (Linux)
         if: matrix.platform == 'linux'
-        run: sudo apt-get install -y ccache
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ccache || echo "::warning::ccache install failed, build continues without caching"
 
       - name: Install ccache (macOS)
         if: matrix.platform == 'macos'
-        run: brew install ccache
+        run: brew install ccache || echo "::warning::ccache install failed, build continues without caching"
 
       - name: Install ccache (Windows)
         if: matrix.platform == 'windows'
-        run: choco install ccache --no-progress
+        run: choco install ccache --no-progress || echo "::warning::ccache install failed, build continues without caching"
 
       - name: Configure ccache
         run: |
-          ccache --max-size "$CCACHE_MAXSIZE"
-          ccache --set-config compiler_check="$CCACHE_COMPILERCHECK"
-          ccache --set-config no_hash_dir="$CCACHE_NOHASHDIR"
-          ccache --set-config sloppiness="$CCACHE_SLOPPINESS"
-          ccache --zero-stats
+          echo "::group::ccache diagnostics"
+          ccache --version || echo "ccache not found"
+          which ccache || true
+          echo "::endgroup::"
+          # All config is set via CCACHE_* env vars (supported in all versions).
+          # --max-size and --zero-stats are supported since ccache 3.x.
+          ccache --max-size "$CCACHE_MAXSIZE" || true
+          ccache --zero-stats || true
 
       - name: Resolve chromium pin and paths
         id: pin
