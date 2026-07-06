@@ -4,6 +4,8 @@ import {
   Bot,
   Compass,
   CreditCard,
+  Heart,
+  Info,
   MessageSquare,
   Palette,
   RotateCcw,
@@ -88,6 +90,8 @@ const primarySettingsSections: NavSection[] = [
 ]
 
 const helpItems: NavItem[] = [
+  { name: 'About Bharat Browser', to: '/settings/about', icon: Info },
+  { name: 'Credits', to: '/settings/credits', icon: Heart },
   { name: 'Docs', href: 'https://docs.browseros.com/', icon: BookOpen },
   { name: 'Features', to: '/onboarding/features', icon: Compass },
   { name: 'Revisit Onboarding', to: '/onboarding', icon: RotateCcw },

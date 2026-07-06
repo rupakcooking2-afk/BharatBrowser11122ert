@@ -37,6 +37,13 @@
       "types": "./src/constants/hermes.ts",
       "default": "./src/constants/hermes.ts"
     },
+    "./constants/creator": {
+      "types": "./src/constants/creator.ts",
+      "default": "./src/constants/creator.ts"
+    },
+    "./constants/creator.json": {
+      "default": "./src/constants/creator.json"
+    },
     "./types/logger": {
       "types": "./src/types/logger.ts",
       "default": "./src/types/logger.ts"

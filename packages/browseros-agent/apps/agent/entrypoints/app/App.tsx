@@ -6,7 +6,9 @@ import { SidebarLayout } from '@/components/layout/SidebarLayout'
 import { AgentCommandConversation } from '@/screens/agent-command/AgentCommandConversation'
 import { AgentCommandHome } from '@/screens/agent-command/AgentCommandHome'
 import { AgentCommandLayout } from '@/screens/agent-command/AgentCommandLayout'
+import { AboutPage } from '@/screens/about/AboutPage'
 import { AISettingsPage } from '@/screens/ai-settings/AISettingsPage'
+import { CreditsPage } from '@/screens/credits/CreditsPage'
 import { LoginPage } from '@/screens/auth/LoginPage'
 import { LogoutPage } from '@/screens/auth/LogoutPage'
 import { ConnectMCP } from '@/screens/connect-mcp/ConnectMCP'
@@ -105,6 +107,8 @@ export const App: FC = () => {
             />
             <Route path="survey" element={<SurveyPage {...surveyParams} />} />
             <Route path="usage" element={<UsagePage />} />
+            <Route path="about" element={<AboutPage />} />
+            <Route path="credits" element={<CreditsPage />} />
             <Route path="*" element={<Navigate to="/settings/ai" replace />} />
           </Route>
         </Route>

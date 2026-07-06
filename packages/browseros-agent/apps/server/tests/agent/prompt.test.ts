@@ -103,6 +103,7 @@ describe('section presence', () => {
     // Each section has a unique XML tag or heading that identifies it
     const expectedMarkers = [
       '<role>', // role-and-mode
+      '<creator_identity>', // creator-identity
       '<security>', // security
       '<capabilities>', // capabilities
       '<execution>', // execution
@@ -125,6 +126,77 @@ describe('section presence', () => {
     const prompt = buildRegular()
     expect(prompt.startsWith('<AGENT_PROMPT>')).toBe(true)
     expect(prompt.endsWith('</AGENT_PROMPT>')).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Creator Identity Section
+//
+// Why: The AI assistant must always know who created Bharat Browser and be
+// able to answer creator-related questions consistently. This section
+// provides permanent identity instructions to the model.
+// ---------------------------------------------------------------------------
+
+describe('creator-identity section', () => {
+  it('includes creator-identity section in regular mode', () => {
+    const prompt = buildRegular()
+    expect(prompt).toContain('<creator_identity>')
+    expect(prompt).toContain('</creator_identity>')
+  })
+
+  it('includes creator name in identity section', () => {
+    const prompt = buildRegular()
+    expect(prompt).toContain('Lakshy Kumar')
+  })
+
+  it('includes school information', () => {
+    const prompt = buildRegular()
+    expect(prompt).toContain('PM SHRI Kendriya Vidyalaya No. 2 Kota')
+  })
+
+  it('includes assistant name Bharat AI', () => {
+    const prompt = buildRegular()
+    expect(prompt).toContain('Bharat AI')
+    expect(prompt).toContain('Bharat Browser')
+  })
+
+  it('includes class 8A', () => {
+    const prompt = buildRegular()
+    expect(prompt).toContain('Class 8A')
+  })
+
+  it('instructs AI not to fabricate a different creator', () => {
+    const prompt = buildRegular()
+    expect(prompt).toContain('Do not fabricate')
+  })
+
+  it('instructs AI not to falsely claim creator built the AI model', () => {
+    const prompt = buildRegular()
+    expect(prompt).toContain('underlying AI model')
+  })
+
+  it('includes creator-identity section in chat mode', () => {
+    const prompt = buildChatMode()
+    expect(prompt).toContain('<creator_identity>')
+  })
+
+  it('includes creator-identity in scheduled task mode', () => {
+    const prompt = buildScheduled()
+    expect(prompt).toContain('<creator_identity>')
+  })
+
+  it('appears after role section (primacy hierarchy)', () => {
+    const prompt = buildRegular()
+    const rolePos = prompt.indexOf('<role>')
+    const creatorPos = prompt.indexOf('<creator_identity>')
+    expect(creatorPos).toBeGreaterThan(rolePos)
+  })
+
+  it('appears before security section', () => {
+    const prompt = buildRegular()
+    const creatorPos = prompt.indexOf('<creator_identity>')
+    const securityPos = prompt.indexOf('<security>')
+    expect(creatorPos).toBeLessThan(securityPos)
   })
 })
 
@@ -933,6 +1005,7 @@ describe('structural invariants', () => {
     const prompt = buildRegular()
     const finalPos = prompt.indexOf('<FINAL_REMINDER>')
     expect(finalPos).toBeGreaterThan(prompt.indexOf('<role>'))
+    expect(finalPos).toBeGreaterThan(prompt.indexOf('<creator_identity>'))
     expect(finalPos).toBeGreaterThan(prompt.indexOf('<security>'))
     expect(finalPos).toBeGreaterThan(prompt.indexOf('<capabilities>'))
     expect(finalPos).toBeGreaterThan(prompt.indexOf('<execution>'))

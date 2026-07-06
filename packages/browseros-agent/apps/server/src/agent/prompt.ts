@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+import { buildCreatorSystemPrompt } from '@browseros/shared/constants/creator'
 import { OAUTH_MCP_SERVERS } from '../lib/clients/klavis/oauth-mcp-servers'
 
 /**
@@ -55,6 +56,14 @@ You do not have a filesystem workspace in this session. Return all results direc
   }
 
   return `<role>\n${role}\n</role>`
+}
+
+// -----------------------------------------------------------------------------
+// section: creator-identity
+// -----------------------------------------------------------------------------
+
+function getCreatorIdentity(): string {
+  return buildCreatorSystemPrompt()
 }
 
 // -----------------------------------------------------------------------------
@@ -622,6 +631,7 @@ type PromptSectionFn = (
 
 const promptSections: Record<string, PromptSectionFn> = {
   'role-and-mode': getRoleAndMode,
+  'creator-identity': getCreatorIdentity,
   security: getSecurity,
   capabilities: getCapabilities,
   'acp-tool-namespace': getAcpToolNamespace,

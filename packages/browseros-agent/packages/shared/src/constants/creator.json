@@ -1,0 +1,16 @@
+{
+  "creator": {
+    "name": "Lakshy Kumar",
+    "class": "8A",
+    "school": "PM SHRI Kendriya Vidyalaya No. 2 Kota",
+    "role": "Creator and Developer of Bharat Browser"
+  },
+  "product": {
+    "name": "Bharat Browser",
+    "assistantName": "Bharat AI"
+  },
+  "ownership": {
+    "owner": "Lakshy Kumar",
+    "entity": "Bharat Browser is created and developed by Lakshy Kumar, a student of Class 8A at PM SHRI Kendriya Vidyalaya No. 2 Kota."
+  }
+}

@@ -1,5 +1,6 @@
 import { Info, Keyboard } from 'lucide-react'
 import type { FC } from 'react'
+import { Link } from 'react-router'
 import { Button } from '@/components/ui/button'
 import {
   Tooltip,
@@ -37,10 +38,8 @@ export const SidebarUserFooter: FC<SidebarUserFooterProps> = ({
   // )
 
   const aboutLink = (
-    <a
-      href="https://docs.browseros.com/"
-      target="_blank"
-      rel="noopener noreferrer"
+    <Link
+      to="/settings/about"
       className="flex h-9 items-center gap-2 overflow-hidden whitespace-nowrap rounded-md px-3 font-medium text-sm transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
     >
       <Info className="size-4 shrink-0" />
@@ -50,9 +49,9 @@ export const SidebarUserFooter: FC<SidebarUserFooterProps> = ({
           expanded ? 'opacity-100' : 'opacity-0',
         )}
       >
-        About BrowserOS
+        About Bharat Browser
       </span>
-    </a>
+    </Link>
   )
 
   const shortcutsButton = (
