@@ -1,8 +1,6 @@
-diff --git a/chrome/browser/resources/settings/about_page/about_page.html b/chrome/browser/resources/settings/about_page/about_page.html
-index 5069802bf7a17..39b15f479c20b 100644
 --- a/chrome/browser/resources/settings/about_page/about_page.html
 +++ b/chrome/browser/resources/settings/about_page/about_page.html
-@@ -5,10 +5,7 @@
+@@ -5,12 +5,7 @@
  
        .info-sections {
          padding: var(--cr-section-vertical-padding) var(--cr-section-padding);
@@ -10,11 +8,13 @@ index 5069802bf7a17..39b15f479c20b 100644
 -
 -      .info-section {
 -        margin-bottom: 12px;
+-      }
+-
 +        line-height: 1.8;
-       }
- 
        .product-title {
-@@ -47,7 +44,7 @@
+         font-size: 153.85%;  /* 20px / 13px */
+         font-weight: 400;
+@@ -47,7 +42,7 @@
      </style>
      <settings-section page-title="$i18n{aboutPageTitle}">
        <div class="cr-row two-line first">
@@ -23,7 +23,7 @@ index 5069802bf7a17..39b15f479c20b 100644
              srcset="chrome://theme/current-channel-logo@1x 1x,
                      chrome://theme/current-channel-logo@2x 2x"
              alt="$i18n{aboutProductLogoAlt}"
-@@ -78,12 +75,6 @@
+@@ -78,12 +73,6 @@
                  inner-h-t-m-l="[[getUpdateStatusMessage_(
                      currentUpdateStatusEvent_)]]">
              </div>
@@ -36,7 +36,7 @@ index 5069802bf7a17..39b15f479c20b 100644
            </div>
            <span id="deprecationWarning"
                hidden="[[!obsoleteSystemInfo_.obsolete]]">
-@@ -94,6 +85,7 @@
+@@ -94,6 +83,7 @@
              </a>
            </span>
  </if>
@@ -44,7 +44,7 @@ index 5069802bf7a17..39b15f479c20b 100644
            <div class="secondary">$i18n{aboutBrowserVersion}</div>
          </div>
  <if expr="not is_chromeos">
-@@ -114,12 +106,6 @@
+@@ -114,12 +104,6 @@
              on-click="onPromoteUpdaterClick_">
            <div class="flex">
              [[promoteUpdaterStatus_.text]]
@@ -57,17 +57,22 @@ index 5069802bf7a17..39b15f479c20b 100644
            </div>
            <cr-icon-button class="subpage-arrow"
                hidden$="[[!promoteUpdaterStatus_.actionable]]"
-@@ -148,7 +134,13 @@
+@@ -148,7 +132,6 @@
      <settings-section>
        <div class="info-sections">
          <div class="info-section">
 -          <div class="secondary">$i18n{aboutProductTitle}</div>
            <div class="secondary">$i18n{aboutProductCopyright}</div>
          </div>
+ 
+@@ -166,5 +149,10 @@
+         on-close="onRelaunchDialogClose"></relaunch-confirmation-dialog>
+   </template>
+ </if>
 +        <div class="info-section">
 +          <div class="secondary">Creator: Lakshy Kumar</div>
 +          <div class="secondary">Class 8A, PM SHRI Kendriya Vidyalaya No. 2 Kota</div>
 +          <div class="secondary">Role: Creator &amp; Developer of Bharat Browser</div>
 +        </div>
        </div>
- 
+     </settings-section>
