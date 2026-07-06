@@ -12,7 +12,7 @@ build:
   architecture: arm64
 
 gn_flags:
-  file: build/config/gn/flags.macos.release.gn
+  file: build/config/gn/flags.macos.release.ci.gn
 
 # Explicit module execution order
 modules:

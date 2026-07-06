@@ -20,6 +20,27 @@ from ...common.utils import (
 
 GB_PER_COMPILE_JOB = 4
 
+# Enable ccache stats logging when ccache is configured
+_CCACHE_STATS_QUERIED = False
+
+
+def log_ccache_stats() -> None:
+    """Log ccache hit rate stats if ccache is installed."""
+    global _CCACHE_STATS_QUERIED
+    if _CCACHE_STATS_QUERIED:
+        return
+    _CCACHE_STATS_QUERIED = True
+    try:
+        result = run_command(["ccache", "-s"], check=False)
+        if result and result.returncode == 0:
+            # Extract the summary lines from ccache output
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if any(kw in line for kw in ("cache hit", "cache miss", "files in cache", "cache size")):
+                    log_info(f"  ccache: {line}")
+    except FileNotFoundError:
+        pass  # ccache not installed
+
 
 def _windows_total_memory_gb() -> Optional[float]:
     """Total physical RAM in GB via GlobalMemoryStatusEx; None when unavailable."""
@@ -78,13 +99,17 @@ def compute_ninja_jobs(env: Optional[Mapping[str, str]] = None) -> Optional[int]
 
     # Windows has no overcommit: official+ThinLTO clang-cl jobs peak ~4 GB each,
     # and one-job-per-core exhausts commit (LLVM ERROR: out of memory).
-    jobs = max(1, int(total_gb) // GB_PER_COMPILE_JOB)
+    # Jumbo builds merge translation units so each job needs ~6 GB.
+    gb_per_job = GB_PER_COMPILE_JOB
+    if "use_jumbo_build" in os.environ.get("GN_ARGS", ""):
+        gb_per_job = 6
+    jobs = max(1, int(total_gb) // gb_per_job)
     cpus = os.cpu_count()
     if cpus:
         jobs = min(jobs, cpus)
     log_info(
         f"Ninja parallelism: -j {jobs} (capped by {int(total_gb)} GB RAM / "
-        f"{GB_PER_COMPILE_JOB} GB per job; override with BROWSEROS_NINJA_JOBS)"
+        f"{gb_per_job} GB per job; override with BROWSEROS_NINJA_JOBS)"
     )
     return jobs
 
@@ -123,10 +148,16 @@ class CompileModule(CommandModule):
 
         self._create_version_file(ctx)
 
+        # Log ccache stats before build (if ccache is configured)
+        log_ccache_stats()
+
         run_command(
             autoninja_command(ctx.out_dir, ["chrome", "chromedriver"]),
             cwd=ctx.chromium_src,
         )
+
+        # Log ccache stats after build
+        log_ccache_stats()
 
         app_path = ctx.get_chromium_app_path()
         new_path = ctx.get_app_path()

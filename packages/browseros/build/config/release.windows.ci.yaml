@@ -15,7 +15,7 @@ build:
   architecture: x64
 
 gn_flags:
-  file: build/config/gn/flags.windows.release.gn
+  file: build/config/gn/flags.windows.release.ci.gn
 
 modules:
   # Patches & Resources

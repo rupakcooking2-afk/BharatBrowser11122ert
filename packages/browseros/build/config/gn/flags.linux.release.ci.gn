@@ -1,0 +1,66 @@
+# CI Linux Release Build Flags — optimized for speed on GitHub runners
+# Inherits: flags.linux.release.gn + CI-specific overrides
+
+# Build type
+is_debug = false
+is_official_build = true
+is_component_build = false
+use_siso=false
+
+# Compiler
+use_sysroot = true
+use_custom_libcxx = true
+is_clang = true
+clang_use_chrome_plugins = false
+fatal_linker_warnings = false
+
+# ccache — wrapper around the compiler; caches object files across runs
+cc_wrapper = "ccache"
+
+# ThinLTO instead of full LTO (default with is_official_build)
+# ThinLTO is nearly as fast as full LTO for code quality but links 2-3x faster
+use_thin_lto = true
+
+# Jumbo/unity build — merge multiple translation units for faster compilation
+# Typical speedup: 30-50%
+use_jumbo_build = true
+
+# Core features
+enable_nacl = false
+enable_widevine = true
+enable_remoting = false
+enable_hangout_services_extension = false
+disable_fieldtrial_testing_config = true
+
+# Media
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+
+# Hardware acceleration
+use_vaapi = true
+
+# Libraries
+use_system_libffi = false
+
+# Optimization and binary size reduction
+symbol_level = 0
+blink_symbol_level = 0
+exclude_unwind_tables = true
+
+chrome_pgo_phase = 0
+dcheck_always_on = false
+enable_swiftshader = false
+
+# API Keys (disable Google services)
+google_api_key = ""
+google_default_client_id = ""
+google_default_client_secret = ""
+use_official_google_api_keys = false
+
+# CI-specific: disable unused features for faster compilation
+enable_print_preview = false
+enable_updater = false
+enable_mdns = false
+enable_iterator_debugging = false
+enable_reporting = false
+enable_service_discovery = false

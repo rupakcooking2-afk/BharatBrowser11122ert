@@ -1,3 +1,6 @@
+# CI macOS Release Build Flags — optimized for speed on GitHub runners
+# Inherits: flags.macos.release.gn + CI-specific overrides
+
 # For official build
 is_debug=false
 is_component_build=false
@@ -11,8 +14,6 @@ enable_sparkle=true
 # new macOS build flags
 use_system_xcode = true
 use_clang_modules = false
-
-
 
 enable_reporting=false
 enable_service_discovery=false
@@ -31,24 +32,21 @@ proprietary_codecs=true
 enable_platform_hevc = true
 disable_fieldtrial_testing_config=true
 
+# ccache — wrapper around the compiler; caches object files across runs
+cc_wrapper = "ccache"
+
 # ThinLTO instead of full LTO (default with is_official_build)
+# ThinLTO is nearly as fast as full LTO for code quality but links 2-3x faster
 use_thin_lto = true
 
-# Jumbo/unity build — merge translation units for faster compilation
+# Jumbo/unity build — merge multiple translation units for faster compilation
+# Typical speedup: 30-50%
 use_jumbo_build = true
 
-
-# build_with_tflite_lib=false
-# clang_use_chrome_plugins=false
-# disable_fieldtrial_testing_config=true
-# enable_hangout_services_extension=false
-# enable_mdns=false
-# enable_nacl=false
-# enable_remoting=false
-# exclude_unwind_tables=true
-# treat_warnings_as_errors=false
-# safe_browsing_mode=0 # Nithin -- this causes some clang error.
-# enable_iterator_debugging=false
-# enable_rust=true
-# fatal_linker_warnings=false
-# use_sysroot=false
+# CI-specific: disable unused features for faster compilation
+enable_nacl = false
+enable_remoting = false
+enable_hangout_services_extension = false
+enable_print_preview = false
+enable_mdns = false
+enable_iterator_debugging = false

@@ -37,6 +37,13 @@ chrome_pgo_phase = 0
 dcheck_always_on = false
 enable_swiftshader = false
 
+# ThinLTO instead of full LTO (default with is_official_build)
+# ThinLTO is nearly as fast for code quality but links 2-3x faster
+use_thin_lto = true
+
+# Jumbo/unity build — merge translation units for faster compilation
+use_jumbo_build = true
+
 # API Keys (disable Google services)
 google_api_key = ""
 google_default_client_id = ""

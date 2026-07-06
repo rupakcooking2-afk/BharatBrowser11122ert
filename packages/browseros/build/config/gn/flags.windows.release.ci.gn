@@ -1,0 +1,53 @@
+# CI Windows Release Build Flags — optimized for speed on GitHub runners
+# Inherits: flags.windows.release.gn + CI-specific overrides
+
+use_siso=false
+is_debug = false
+is_component_build = false
+is_official_build = true
+symbol_level = 0
+is_clang=true
+chrome_pgo_phase = 0
+dcheck_always_on=false
+enable_winsparkle=false
+enable_swiftshader=false
+proprietary_codecs=true
+
+enable_widevine=true
+exclude_unwind_tables=true
+google_api_key=""
+google_default_client_id=""
+google_default_client_secret=""
+treat_warnings_as_errors=false
+use_official_google_api_keys=false
+use_unofficial_version_number=false
+
+target_cpu="x64"
+use_sysroot=false
+blink_symbol_level=0
+v8_symbol_level=0
+symbol_level=0
+
+ffmpeg_branding="Chrome"
+
+# ccache — wrapper around the compiler; caches object files across runs
+cc_wrapper = "ccache"
+
+# ThinLTO instead of full LTO (default with is_official_build)
+# ThinLTO is nearly as fast as full LTO for code quality but links 2-3x faster
+use_thin_lto = true
+
+# Jumbo/unity build — merge multiple translation units for faster compilation
+# Typical speedup: 30-50%
+use_jumbo_build = true
+
+# CI-specific: disable unused features for faster compilation
+enable_nacl = false
+enable_remoting = false
+enable_hangout_services_extension = false
+enable_print_preview = false
+enable_updater = false
+enable_mdns = false
+enable_iterator_debugging = false
+enable_reporting = false
+enable_service_discovery = false

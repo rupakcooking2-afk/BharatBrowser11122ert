@@ -130,6 +130,33 @@ jobs:
 
       - uses: astral-sh/setup-uv@v8.2.0
 
+      - name: Install ccache (macOS)
+        run: brew install ccache
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size 3G
+          ccache --set-config compiler_check=content
+          ccache --set-config no_hash_dir=true
+          ccache --set-config sloppiness=pch_defines,time_macros
+          ccache --zero-stats
+
+      - name: Cache ccache directory
+        id: cache-ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ccache
+          key: ccache-macos-arm64-${{ steps.pin.outputs.version }}
+
+      - name: Cache gclient output
+        id: cache-gclient
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CHROMIUM_ROOT }}/src/third_party
+            ${{ env.CHROMIUM_ROOT }}/src/buildtools
+          key: gclient-macos-arm64-${{ steps.pin.outputs.version }}-${{ hashFiles('packages/browseros/CHROMIUM_VERSION') }}
+
       - name: Resolve chromium pin and paths
         id: pin
         run: |
@@ -161,16 +188,23 @@ jobs:
           uv run --project packages/browseros python scripts/ci/setup_chromium.py \
             --chromium-root "$CHROMIUM_ROOT" --step checkout
 
-      - name: Reset chromium tree (clean module)
+      - name: Reset chromium tree (preserve third_party for gclient cache)
         working-directory: packages/browseros
         run: |
           set -euo pipefail
-          uv run browseros build --modules clean \
-            --chromium-src "$CHROMIUM_SRC" \
-            --build-type release \
-            --arch arm64
+          # Remove only the out/ directory — do NOT clean third_party/ to
+          # preserve gclient-cached dependencies
+          if [ -d "$CHROMIUM_SRC/out" ]; then
+            rm -rf "$CHROMIUM_SRC/out"
+            echo "Removed out/ directory"
+          fi
+          # Reset tracked files to pristine state without touching third_party
+          cd "$CHROMIUM_SRC"
+          git reset --hard HEAD
+          git checkout -- .
 
-      - name: Sync chromium dependencies (gclient)
+      - name: Sync chromium dependencies (gclient) — skip if cache hit
+        if: steps.cache-gclient.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           uv run --project packages/browseros python scripts/ci/setup_chromium.py \
@@ -187,6 +221,9 @@ jobs:
           set -euo pipefail
           config="build/config/release.macos.arm64.noupload.yaml"
           uv run browseros build --config "$config" --chromium-src "$CHROMIUM_SRC"
+
+      - name: Report ccache stats
+        run: ccache -s
 
       - name: Upload DMG artifact
         if: ${{ always() && steps.bump.outputs.version != '' }}
