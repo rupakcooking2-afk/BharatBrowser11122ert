@@ -105,7 +105,7 @@ def compute_ninja_jobs(env: Optional[Mapping[str, str]] = None) -> Optional[int]
         jobs = min(jobs, cpus)
     log_info(
         f"Ninja parallelism: -j {jobs} (capped by {int(total_gb)} GB RAM / "
-        f"{gb_per_job} GB per job; override with BROWSEROS_NINJA_JOBS)"
+        f"{GB_PER_COMPILE_JOB} GB per job; override with BROWSEROS_NINJA_JOBS)"
     )
     return jobs
 
