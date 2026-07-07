@@ -7,8 +7,8 @@ Optimizations applied to reduce Bharat Browser Chromium build time on CI from
 
 ### 1. New CI-Optimized GN Flags Files
 
-Three new files with aggressive CI optimizations (ccache, ThinLTO, jumbo,
-disabled unused features):
+Three new files with aggressive CI optimizations (ccache, ThinLTO, disabled
+unused features):
 
 | File | Purpose |
 | --- | --- |
@@ -22,16 +22,14 @@ Key additions vs. the standard `release.gn` files:
 | --- | --- | --- |
 | `cc_wrapper = "ccache"` | Reuse compiled objects across runs | 30-50% (subseq.) |
 | `use_thin_lto = true` | Faster linking vs. full LTO | 20-30% |
-| `use_jumbo_build = true` | Merge translation units | 30-50% |
 | `enable_nacl = false` | Skip NaCl compilation | marginal |
 | `enable_remoting = false` | Skip remoting compilation | marginal |
 | `enable_hangout_services_extension = false` | Skip Hangouts extension | marginal |
 
 ### 2. Updated Release GN Files
 
-`flags.{linux,windows,macos}.release.gn` now include `use_thin_lto = true` and
-`use_jumbo_build = true` so all builds (local + CI) benefit from faster
-linking and jumbo compilation.
+`flags.{linux,windows,macos}.release.gn` now include `use_thin_lto = true` so
+all builds (local + CI) benefit from faster linking.
 
 ### 3. Updated Config YAMLs
 
@@ -62,7 +60,7 @@ linking and jumbo compilation.
 
 `build/modules/compile/standard.py`:
 - `log_ccache_stats()` — logs ccache hit/miss/size at start and end of build
-- `compute_ninja_jobs()` — accounts for jumbo builds (6 GB/job vs 4 GB)
+- `compute_ninja_jobs()` — computes optimal parallelism based on available RAM
 
 ## Estimated Performance
 

@@ -39,10 +39,6 @@ cc_wrapper = "ccache"
 # ThinLTO is nearly as fast as full LTO for code quality but links 2-3x faster
 use_thin_lto = true
 
-# Jumbo/unity build — merge multiple translation units for faster compilation
-# Typical speedup: 30-50%
-use_jumbo_build = true
-
 # CI-specific: disable unused features for faster compilation
 enable_nacl = false
 enable_remoting = false

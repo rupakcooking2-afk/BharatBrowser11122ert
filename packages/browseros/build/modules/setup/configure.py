@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build configuration module for BrowserOS build system"""
 
+import re
 import sys
 
 from ...common.module import CommandModule, ValidationError
@@ -35,13 +36,6 @@ class ConfigureModule(CommandModule):
     def execute(self, ctx: Context) -> None:
         log_info(f"\n⚙️  Configuring {ctx.build_type} build for {ctx.architecture}...")
 
-        # Linux: ensure the target-arch Debian sysroot is installed before
-        # `gn gen`. sysroot.gni asserts on missing sysroots, and relying on
-        # `gclient sync` DEPS hooks is fragile — the hook only fires when
-        # .gclient declared the right `target_cpus` *before* sync, which
-        # isn't guaranteed for chromium_src checkouts that predate
-        # cross-arch support. install-sysroot.py is idempotent and fast,
-        # so call it unconditionally for the target arch.
         if IS_LINUX():
             self._ensure_linux_sysroot(ctx)
 
@@ -57,12 +51,64 @@ class ConfigureModule(CommandModule):
         args_file.write_text(args_content)
 
         gn_cmd = "gn.bat" if IS_WINDOWS() else "gn"
-        gn_args = [gn_cmd, "gen", ctx.out_dir]
+
         if ctx.build_type != "debug":
-            gn_args.append("--fail-on-unused-args")
-        run_command(gn_args, cwd=ctx.chromium_src)
+            self._configure_with_arg_filter(ctx, gn_cmd, args_file)
+        else:
+            run_command([gn_cmd, "gen", ctx.out_dir], cwd=ctx.chromium_src)
 
         log_success("Build configured")
+
+    def _configure_with_arg_filter(self, ctx, gn_cmd, args_file):
+        # Pass 1 — probe: generate WITHOUT --fail-on-unused-args, then parse
+        # warnings to detect GN args the current Chromium version does not
+        # recognise (e.g. use_jumbo_build was removed after M147).
+        log_info("Probing for unsupported GN build arguments...")
+        result = run_command(
+            [gn_cmd, "gen", ctx.out_dir],
+            cwd=ctx.chromium_src,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"gn gen failed (exit {result.returncode}): {result.stdout}"
+            )
+
+        unsupported = self._find_unsupported_args(result.stdout)
+        if unsupported:
+            log_warning(
+                f"Removing unsupported GN arg(s): {', '.join(sorted(unsupported))}"
+            )
+            self._remove_args_from_file(args_file, unsupported)
+
+        # Pass 2 — validate: regenerate with --fail-on-unused-args to ensure
+        # all remaining args are recognised.
+        run_command(
+            [gn_cmd, "gen", ctx.out_dir, "--fail-on-unused-args"],
+            cwd=ctx.chromium_src,
+        )
+
+    @staticmethod
+    def _find_unsupported_args(output):
+        return set(re.findall(r'Unused build argument "(\w+)"', output))
+
+    @staticmethod
+    def _remove_args_from_file(args_file, unsupported):
+        lines = args_file.read_text().splitlines()
+        filtered = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                filtered.append(line)
+                continue
+            match = re.match(r"(\w+)\s*=", stripped)
+            if match and match.group(1) in unsupported:
+                continue
+            filtered.append(line)
+        text = "\n".join(filtered)
+        if text:
+            text += "\n"
+        args_file.write_text(text)
 
     def _ensure_linux_sysroot(self, ctx: Context) -> None:
         install_script = (

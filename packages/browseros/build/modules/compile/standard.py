@@ -99,11 +99,7 @@ def compute_ninja_jobs(env: Optional[Mapping[str, str]] = None) -> Optional[int]
 
     # Windows has no overcommit: official+ThinLTO clang-cl jobs peak ~4 GB each,
     # and one-job-per-core exhausts commit (LLVM ERROR: out of memory).
-    # Jumbo builds merge translation units so each job needs ~6 GB.
-    gb_per_job = GB_PER_COMPILE_JOB
-    if "use_jumbo_build" in os.environ.get("GN_ARGS", ""):
-        gb_per_job = 6
-    jobs = max(1, int(total_gb) // gb_per_job)
+    jobs = max(1, int(total_gb) // GB_PER_COMPILE_JOB)
     cpus = os.cpu_count()
     if cpus:
         jobs = min(jobs, cpus)

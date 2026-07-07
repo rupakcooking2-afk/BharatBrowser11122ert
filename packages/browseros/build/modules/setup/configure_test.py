@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the GN configure module against a mock checkout."""
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,11 @@ from ...common.context import Context
 from ...common.module import ValidationError
 from ...common.testing import MockBrowserOSRoot, MockChromium, make_context
 from ...common.utils import get_platform
+
+
+def _ok_result(stdout=""):
+    """Shortcut: CompletedProcess with returncode=0."""
+    return subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
 
 
 class ConfigureValidateTest(unittest.TestCase):
@@ -67,7 +73,7 @@ class ConfigureExecuteTest(unittest.TestCase):
         )
 
         with (
-            mock.patch.object(configure, "run_command") as run_cmd,
+            mock.patch.object(configure, "run_command", return_value=_ok_result()) as run_cmd,
             mock.patch.object(configure, "IS_LINUX", return_value=False),
             mock.patch.object(configure, "IS_WINDOWS", return_value=False),
         ):
@@ -85,17 +91,27 @@ class ConfigureExecuteTest(unittest.TestCase):
             'is_official_build = true\n\ntarget_cpu = "arm64"\n',
         )
 
-    def test_release_build_fails_on_unused_args(self):
+    def test_release_build_two_pass_arg_filter(self):
         ctx, _, run_cmd = self._execute("release")
 
-        run_cmd.assert_called_once()
+        # Probe pass (no --fail-on-unused-args)
+        probe_call = run_cmd.call_args_list[0]
         self.assertEqual(
-            run_cmd.call_args.args[0],
+            probe_call.args[0],
+            ["gn", "gen", ctx.out_dir],
+        )
+        self.assertEqual(probe_call.kwargs["cwd"], ctx.chromium_src)
+        self.assertIs(probe_call.kwargs.get("check"), False)
+
+        # Validation pass (with --fail-on-unused-args)
+        final_call = run_cmd.call_args_list[1]
+        self.assertEqual(
+            final_call.args[0],
             ["gn", "gen", ctx.out_dir, "--fail-on-unused-args"],
         )
-        self.assertEqual(run_cmd.call_args.kwargs["cwd"], ctx.chromium_src)
+        self.assertEqual(final_call.kwargs["cwd"], ctx.chromium_src)
 
-    def test_debug_build_omits_fail_on_unused_args(self):
+    def test_debug_build_omits_arg_filter(self):
         ctx, _, run_cmd = self._execute("debug")
 
         self.assertEqual(run_cmd.call_args.args[0], ["gn", "gen", ctx.out_dir])

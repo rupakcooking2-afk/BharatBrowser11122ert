@@ -32,6 +32,3 @@ ffmpeg_branding="Chrome"
 # ThinLTO instead of full LTO (default with is_official_build)
 use_thin_lto = true
 
-# Jumbo/unity build — merge translation units for faster compilation
-use_jumbo_build = true
-

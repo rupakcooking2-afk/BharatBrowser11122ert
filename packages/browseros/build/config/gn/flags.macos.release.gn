@@ -34,9 +34,6 @@ disable_fieldtrial_testing_config=true
 # ThinLTO instead of full LTO (default with is_official_build)
 use_thin_lto = true
 
-# Jumbo/unity build — merge translation units for faster compilation
-use_jumbo_build = true
-
 
 # build_with_tflite_lib=false
 # clang_use_chrome_plugins=false
