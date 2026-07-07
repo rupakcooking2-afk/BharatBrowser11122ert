@@ -19,60 +19,84 @@ from ...common.utils import (
 )
 
 GB_PER_COMPILE_JOB = 4
+GB_PER_COMPILE_JOB_POSIX = 2  # Linux/macOS handle overcommit; can push harder
 
-# Enable ccache stats logging when ccache is configured
+# Enable cache stats logging (ccache / sccache)
 _CCACHE_STATS_QUERIED = False
+_SCCACHE_STATS_QUERIED = False
 
 
-def log_ccache_stats() -> None:
-    """Log ccache hit rate stats if ccache is installed."""
-    global _CCACHE_STATS_QUERIED
-    if _CCACHE_STATS_QUERIED:
-        return
-    _CCACHE_STATS_QUERIED = True
+def _run_and_log_cache_cmd(cmd: list[str], label: str) -> None:
+    """Run a cache-query command and log key lines."""
     try:
-        result = run_command(["ccache", "-s"], check=False)
+        result = run_command(cmd, check=False)
         if result and result.returncode == 0:
-            # Extract the summary lines from ccache output
             for line in result.stdout.splitlines():
                 line = line.strip()
                 if any(kw in line for kw in ("cache hit", "cache miss", "files in cache", "cache size")):
-                    log_info(f"  ccache: {line}")
+                    log_info(f"  {label}: {line}")
     except (FileNotFoundError, AttributeError, OSError):
-        pass  # ccache not installed or unusable
+        pass
 
 
-def _windows_total_memory_gb() -> Optional[float]:
-    """Total physical RAM in GB via GlobalMemoryStatusEx; None when unavailable."""
-    if sys.platform != "win32":
-        return None
+def log_cache_stats() -> None:
+    """Log ccache and sccache hit-rate stats once per build."""
+    global _CCACHE_STATS_QUERIED, _SCCACHE_STATS_QUERIED
+    if not _CCACHE_STATS_QUERIED:
+        _CCACHE_STATS_QUERIED = True
+        _run_and_log_cache_cmd(["ccache", "-s"], "ccache")
+    if not _SCCACHE_STATS_QUERIED:
+        _SCCACHE_STATS_QUERIED = True
+        _run_and_log_cache_cmd(["sccache", "--show-stats"], "sccache")
+
+
+def _total_memory_gb() -> Optional[float]:
+    """Total physical RAM in GB; None when unavailable.  Cross-platform."""
     try:
-        import ctypes
+        if sys.platform == "win32":
+            import ctypes
 
-        class MEMORYSTATUSEX(ctypes.Structure):
-            _fields_ = [
-                ("dwLength", ctypes.c_uint32),
-                ("dwMemoryLoad", ctypes.c_uint32),
-                ("ullTotalPhys", ctypes.c_uint64),
-                ("ullAvailPhys", ctypes.c_uint64),
-                ("ullTotalPageFile", ctypes.c_uint64),
-                ("ullAvailPageFile", ctypes.c_uint64),
-                ("ullTotalVirtual", ctypes.c_uint64),
-                ("ullAvailVirtual", ctypes.c_uint64),
-                ("ullAvailExtendedVirtual", ctypes.c_uint64),
-            ]
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_uint32),
+                    ("dwMemoryLoad", ctypes.c_uint32),
+                    ("ullTotalPhys", ctypes.c_uint64),
+                    ("ullAvailPhys", ctypes.c_uint64),
+                    ("ullTotalPageFile", ctypes.c_uint64),
+                    ("ullAvailPageFile", ctypes.c_uint64),
+                    ("ullTotalVirtual", ctypes.c_uint64),
+                    ("ullAvailVirtual", ctypes.c_uint64),
+                    ("ullAvailExtendedVirtual", ctypes.c_uint64),
+                ]
 
-        status = MEMORYSTATUSEX()
-        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            status = MEMORYSTATUSEX()
+            status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return None
+            return status.ullTotalPhys / (1024**3)
+        else:
+            # Linux / macOS: read from /proc/meminfo or sysctl
+            if sys.platform == "linux":
+                with open("/proc/meminfo") as f:
+                    for line in f:
+                        if line.startswith("MemTotal:"):
+                            kb = int(line.split()[1])
+                            return kb / (1024 * 1024)
+            elif sys.platform == "darwin":
+                import subprocess
+                result = subprocess.run(
+                    ["sysctl", "-n", "hw.memsize"],
+                    capture_output=True, text=True, check=False,
+                )
+                if result.returncode == 0:
+                    return int(result.stdout.strip()) / (1024**3)
             return None
-        return status.ullTotalPhys / (1024**3)
     except Exception:
         return None
 
 
 def compute_ninja_jobs(env: Optional[Mapping[str, str]] = None) -> Optional[int]:
-    """Resolve the -j value: env override, else Windows RAM cap, else None (autoninja default)."""
+    """Resolve the -j value: env override, else RAM-based cap, else autoninja default."""
     if env is None:
         env = os.environ
 
@@ -87,25 +111,23 @@ def compute_ninja_jobs(env: Optional[Mapping[str, str]] = None) -> Optional[int]
             return jobs
         log_warning(f"Ignoring invalid BROWSEROS_NINJA_JOBS={override!r}")
 
-    if not IS_WINDOWS():
-        return None
-
-    total_gb = _windows_total_memory_gb()
+    total_gb = _total_memory_gb()
     if total_gb is None:
         log_warning(
             "Could not query physical memory; using autoninja default parallelism"
         )
         return None
 
-    # Windows has no overcommit: official+ThinLTO clang-cl jobs peak ~4 GB each,
-    # and one-job-per-core exhausts commit (LLVM ERROR: out of memory).
-    jobs = max(1, int(total_gb) // GB_PER_COMPILE_JOB)
+    # Windows has no overcommit: clang-cl jobs peak ~4 GB each.
+    # Linux/macOS handle overcommit well; can push to ~2 GB per job.
+    gb_per_job = GB_PER_COMPILE_JOB if IS_WINDOWS() else GB_PER_COMPILE_JOB_POSIX
+    jobs = max(1, int(total_gb) // gb_per_job)
     cpus = os.cpu_count()
     if cpus:
         jobs = min(jobs, cpus)
     log_info(
         f"Ninja parallelism: -j {jobs} (capped by {int(total_gb)} GB RAM / "
-        f"{GB_PER_COMPILE_JOB} GB per job; override with BROWSEROS_NINJA_JOBS)"
+        f"{gb_per_job} GB per job; override with BROWSEROS_NINJA_JOBS)"
     )
     return jobs
 
@@ -144,16 +166,14 @@ class CompileModule(CommandModule):
 
         self._create_version_file(ctx)
 
-        # Log ccache stats before build (if ccache is configured)
-        log_ccache_stats()
+        log_cache_stats()
 
         run_command(
             autoninja_command(ctx.out_dir, ["chrome", "chromedriver"]),
             cwd=ctx.chromium_src,
         )
 
-        # Log ccache stats after build
-        log_ccache_stats()
+        log_cache_stats()
 
         app_path = ctx.get_chromium_app_path()
         new_path = ctx.get_app_path()

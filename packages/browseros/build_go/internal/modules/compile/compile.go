@@ -16,7 +16,10 @@ import (
 	"github.com/browseros-ai/BrowserOS/packages/browseros/build_go/internal/platform"
 )
 
-const gbPerCompileJob = 4
+const (
+	gbPerCompileJob     = 4   // Windows: no overcommit, clang-cl
+	gbPerCompileJobPosix = 2  // Linux/macOS: overcommit, can push harder
+)
 
 // JobsConfig pins the inputs of the -j computation for tests.
 type JobsConfig struct {
@@ -36,7 +39,7 @@ func defaultJobsConfig(plat platform.Platform) JobsConfig {
 }
 
 // ComputeNinjaJobs resolves the -j value: BROWSEROS_NINJA_JOBS override, else
-// the Windows RAM cap, else 0 (= autoninja default). Mirrors
+// RAM-based cap for all platforms, else 0 (= autoninja default). Mirrors
 // standard.py compute_ninja_jobs.
 func ComputeNinjaJobs(cfg JobsConfig) int {
 	if override := cfg.Getenv("BROWSEROS_NINJA_JOBS"); override != "" {
@@ -48,19 +51,19 @@ func ComputeNinjaJobs(cfg JobsConfig) int {
 		logx.Warning(fmt.Sprintf("Ignoring invalid BROWSEROS_NINJA_JOBS=%q", override))
 	}
 
-	if !cfg.Platform.IsWindows() {
-		return 0
-	}
-
 	totalGB, ok := cfg.TotalMemGB()
 	if !ok {
 		logx.Warning("Could not query physical memory; using autoninja default parallelism")
 		return 0
 	}
 
-	// Windows has no overcommit: official+ThinLTO clang-cl jobs peak ~4 GB
-	// each, and one-job-per-core exhausts commit (LLVM ERROR: out of memory).
-	jobs := int(totalGB) / gbPerCompileJob
+	// Windows has no overcommit: clang-cl jobs peak ~4 GB each.
+	// Linux/macOS handle overcommit well; can push to ~2 GB/job.
+	gPerJob := gbPerCompileJob
+	if !cfg.Platform.IsWindows() {
+		gPerJob = gbPerCompileJobPosix
+	}
+	jobs := int(totalGB) / gPerJob
 	if jobs < 1 {
 		jobs = 1
 	}
@@ -69,7 +72,7 @@ func ComputeNinjaJobs(cfg JobsConfig) int {
 	}
 	logx.Info(fmt.Sprintf(
 		"Ninja parallelism: -j %d (capped by %d GB RAM / %d GB per job; override with BROWSEROS_NINJA_JOBS)",
-		jobs, int(totalGB), gbPerCompileJob))
+		jobs, int(totalGB), gPerJob))
 	return jobs
 }
 

@@ -19,18 +19,41 @@ class ComputeNinjaJobsTest(unittest.TestCase):
 
     def test_invalid_override_is_ignored(self):
         for bad in ("abc", "0", "-3", ""):
-            with mock.patch.object(standard, "IS_WINDOWS", return_value=False):
+            with (
+                mock.patch.object(standard, "IS_WINDOWS", return_value=False),
+                mock.patch.object(standard, "_total_memory_gb") as probe,
+            ):
                 jobs = standard.compute_ninja_jobs({"BROWSEROS_NINJA_JOBS": bad})
             self.assertIsNone(jobs, f"override {bad!r} should be ignored")
 
-    def test_non_windows_without_override_keeps_default(self):
-        with mock.patch.object(standard, "IS_WINDOWS", return_value=False):
+    def test_non_windows_memory_probe_failure_falls_back(self):
+        with (
+            mock.patch.object(standard, "IS_WINDOWS", return_value=False),
+            mock.patch.object(standard, "_total_memory_gb", return_value=None),
+        ):
             self.assertIsNone(standard.compute_ninja_jobs({}))
+
+    def test_non_windows_caps_jobs_by_ram(self):
+        with (
+            mock.patch.object(standard, "IS_WINDOWS", return_value=False),
+            mock.patch.object(standard, "_total_memory_gb", return_value=16.0),
+            mock.patch("os.cpu_count", return_value=32),
+        ):
+            # Linux/macOS: 2 GB/job → 16/2 = 8
+            self.assertEqual(standard.compute_ninja_jobs({}), 8)
+
+    def test_non_windows_clamps_to_cpu_count(self):
+        with (
+            mock.patch.object(standard, "IS_WINDOWS", return_value=False),
+            mock.patch.object(standard, "_total_memory_gb", return_value=64.0),
+            mock.patch("os.cpu_count", return_value=4),
+        ):
+            self.assertEqual(standard.compute_ninja_jobs({}), 4)
 
     def test_valid_override_on_windows_skips_memory_probe(self):
         with (
             mock.patch.object(standard, "IS_WINDOWS", return_value=True),
-            mock.patch.object(standard, "_windows_total_memory_gb") as probe,
+            mock.patch.object(standard, "_total_memory_gb") as probe,
         ):
             jobs = standard.compute_ninja_jobs({"BROWSEROS_NINJA_JOBS": "24"})
         self.assertEqual(jobs, 24)
@@ -39,7 +62,7 @@ class ComputeNinjaJobsTest(unittest.TestCase):
     def test_invalid_override_on_windows_falls_through_to_memory_cap(self):
         with (
             mock.patch.object(standard, "IS_WINDOWS", return_value=True),
-            mock.patch.object(standard, "_windows_total_memory_gb", return_value=64.0),
+            mock.patch.object(standard, "_total_memory_gb", return_value=64.0),
             mock.patch("os.cpu_count", return_value=32),
         ):
             jobs = standard.compute_ninja_jobs({"BROWSEROS_NINJA_JOBS": "abc"})
@@ -48,7 +71,7 @@ class ComputeNinjaJobsTest(unittest.TestCase):
     def test_windows_caps_jobs_by_physical_memory(self):
         with (
             mock.patch.object(standard, "IS_WINDOWS", return_value=True),
-            mock.patch.object(standard, "_windows_total_memory_gb", return_value=64.0),
+            mock.patch.object(standard, "_total_memory_gb", return_value=64.0),
             mock.patch("os.cpu_count", return_value=32),
         ):
             self.assertEqual(standard.compute_ninja_jobs({}), 16)
@@ -56,7 +79,7 @@ class ComputeNinjaJobsTest(unittest.TestCase):
     def test_windows_clamps_to_cpu_count(self):
         with (
             mock.patch.object(standard, "IS_WINDOWS", return_value=True),
-            mock.patch.object(standard, "_windows_total_memory_gb", return_value=256.0),
+            mock.patch.object(standard, "_total_memory_gb", return_value=256.0),
             mock.patch("os.cpu_count", return_value=16),
         ):
             self.assertEqual(standard.compute_ninja_jobs({}), 16)
@@ -64,7 +87,7 @@ class ComputeNinjaJobsTest(unittest.TestCase):
     def test_windows_never_returns_less_than_one_job(self):
         with (
             mock.patch.object(standard, "IS_WINDOWS", return_value=True),
-            mock.patch.object(standard, "_windows_total_memory_gb", return_value=2.0),
+            mock.patch.object(standard, "_total_memory_gb", return_value=2.0),
             mock.patch("os.cpu_count", return_value=8),
         ):
             self.assertEqual(standard.compute_ninja_jobs({}), 1)
@@ -72,7 +95,7 @@ class ComputeNinjaJobsTest(unittest.TestCase):
     def test_windows_memory_probe_failure_falls_back_to_default(self):
         with (
             mock.patch.object(standard, "IS_WINDOWS", return_value=True),
-            mock.patch.object(standard, "_windows_total_memory_gb", return_value=None),
+            mock.patch.object(standard, "_total_memory_gb", return_value=None),
             mock.patch("os.cpu_count", return_value=32),
         ):
             self.assertIsNone(standard.compute_ninja_jobs({}))
@@ -80,10 +103,18 @@ class ComputeNinjaJobsTest(unittest.TestCase):
     def test_windows_unknown_cpu_count_uses_memory_value(self):
         with (
             mock.patch.object(standard, "IS_WINDOWS", return_value=True),
-            mock.patch.object(standard, "_windows_total_memory_gb", return_value=64.0),
+            mock.patch.object(standard, "_total_memory_gb", return_value=64.0),
             mock.patch("os.cpu_count", return_value=None),
         ):
             self.assertEqual(standard.compute_ninja_jobs({}), 16)
+
+    def test_posix_unknown_cpu_count_uses_memory_value(self):
+        with (
+            mock.patch.object(standard, "IS_WINDOWS", return_value=False),
+            mock.patch.object(standard, "_total_memory_gb", return_value=16.0),
+            mock.patch("os.cpu_count", return_value=None),
+        ):
+            self.assertEqual(standard.compute_ninja_jobs({}), 8)
 
 
 class AutoninjaCommandTest(unittest.TestCase):
@@ -108,14 +139,17 @@ class AutoninjaCommandTest(unittest.TestCase):
         )
 
     def test_default_parallelism_has_no_jobs_flag(self):
-        with mock.patch.object(standard, "IS_WINDOWS", return_value=False):
+        with (
+            mock.patch.object(standard, "IS_WINDOWS", return_value=False),
+            mock.patch.object(standard, "_total_memory_gb", return_value=None),
+        ):
             cmd = standard.autoninja_command("out/Default_arm64", ["chrome"], {})
         self.assertEqual(cmd, ["autoninja", "-C", "out/Default_arm64", "chrome"])
 
     def test_windows_uses_bat_and_memory_capped_jobs(self):
         with (
             mock.patch.object(standard, "IS_WINDOWS", return_value=True),
-            mock.patch.object(standard, "_windows_total_memory_gb", return_value=64.0),
+            mock.patch.object(standard, "_total_memory_gb", return_value=64.0),
             mock.patch("os.cpu_count", return_value=32),
         ):
             cmd = standard.autoninja_command("out/Default_x64", ["chrome"], {})
@@ -133,6 +167,7 @@ class CompileModuleExecuteTest(unittest.TestCase):
         with (
             mock.patch.object(standard, "run_command") as run_cmd,
             mock.patch.object(standard, "IS_WINDOWS", return_value=False),
+            mock.patch.object(standard, "_total_memory_gb", return_value=None),
             mock.patch.object(standard.CompileModule, "_create_version_file"),
             mock.patch.dict("os.environ", {}, clear=True),
         ):
@@ -156,6 +191,7 @@ class BuildTargetTest(unittest.TestCase):
         with (
             mock.patch.object(standard, "run_command") as run_cmd,
             mock.patch.object(standard, "IS_WINDOWS", return_value=False),
+            mock.patch.object(standard, "_total_memory_gb", return_value=None),
             mock.patch.dict("os.environ", {}, clear=True),
         ):
             standard.build_target(ctx, "mini_installer")

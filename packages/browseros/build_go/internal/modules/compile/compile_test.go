@@ -50,14 +50,18 @@ func TestComputeNinjaJobsEnvOverrideAndNonWindows(t *testing.T) {
 	if got := ComputeNinjaJobs(jobsCfg(macArm, env, 0, false, 8)); got != 6 {
 		t.Errorf("override jobs = %d, want 6", got)
 	}
-	// Invalid override ignored → non-Windows default.
+	// Invalid override ignored → falls through to RAM cap.
 	env["BROWSEROS_NINJA_JOBS"] = "banana"
-	if got := ComputeNinjaJobs(jobsCfg(macArm, env, 0, false, 8)); got != 0 {
-		t.Errorf("invalid override = %d, want 0", got)
+	if got := ComputeNinjaJobs(jobsCfg(macArm, env, 8, true, 16)); got != 4 {
+		t.Errorf("invalid override = %d, want 4 (8 GB / 2 GB per job)", got)
 	}
-	// Non-Windows never caps by RAM.
-	if got := ComputeNinjaJobs(jobsCfg(macArm, nil, 8, true, 16)); got != 0 {
-		t.Errorf("macos jobs = %d, want 0", got)
+	// Non-Windows caps by RAM at 2 GB/job.
+	if got := ComputeNinjaJobs(jobsCfg(macArm, nil, 8, true, 16)); got != 4 {
+		t.Errorf("macos jobs = %d, want 4 (8 GB / 2 GB per job)", got)
+	}
+	// Memory probe failure → autoninja default.
+	if got := ComputeNinjaJobs(jobsCfg(macArm, nil, 0, false, 8)); got != 0 {
+		t.Errorf("failed probe = %d, want 0", got)
 	}
 }
 
