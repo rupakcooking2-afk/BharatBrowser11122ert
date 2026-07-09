@@ -1,333 +1,26 @@
-name: Nightly Release Build
+name: Publish Nightly Release
 
-# Production CI pipeline for unsigned nightly Bharat Browser builds.
+# Publishes artifacts produced by the Build Bharat Browser (Resumable)
+# workflow as a GitHub nightly prerelease.
 #
-# Architecture
-# ────────────
-#   Job 1  plan       — resolve build matrix & publish flag         (< 1 min)
-#   Job 2  build      — matrix (linux-x64 / windows-x64 / macos-arm64)
-#          ├─ checkout & setup-uv
-#          ├─ cache restore (depot_tools / gclient / build-out / ccache)
-#          ├─ SEED CHECK: restore pre-seeded sccache/ccache archive from R2
-#          ├─ setup_chromium checkout (skipped if .git already at pinned tag)
-#          ├─ gclient sync (skipped on gclient cache hit)
-#          ├─ install sccache + configure R2 backend
-#          ├─ compile (autoninja with RAM-capped -j parallelism)
-#          ├─ log cache stats + disk usage
-#          ├─ package (AppImage+deb / DMG / installer+zip)
-#          └─ upload artifacts
-#   Job 3  publish   — create GitHub nightly prerelease             (< 1 min)
-#
-# Key optimisations
-# ─────────────────
-#   - sccache with R2 backend: distributed object cache shared across
-#     all runners, branches and PRs.  Pre-seeded archive makes every
-#     CI run a "warm" rebuild (~70-80 % cache hits).
-#   - RAM-capped -j on ALL platforms (not just Windows).
-#   - Version-keyed gclient cache: third_party is never re-downloaded
-#     when the Chromium version is unchanged.
-#   - Build-output cache: Ninja .ninja_log + deps survive between runs
-#     for true incremental builds.
-#   - depot_tools shallow clone cached indefinitely.
-#   - git reset --hard only when patches or Chromium source changed.
-#   - No `rm -rf out/` unless GN flags or compiler config changed.
-#
-# Constraints
-# ───────────
-#   - Everything compiles from source (no prebuilt Chromium).
-#   - 100 % of BrowserOS patches and features are preserved.
-#   - Bharat Browser branding fully intact.
+# Triggered when the build workflow completes — no compilation happens here.
 
 on:
+  workflow_run:
+    workflows: ["Build Bharat Browser (Resumable)"]
+    types: [completed]
   workflow_dispatch:
-    inputs:
-      platforms:
-        description: Platforms to build
-        type: choice
-        default: all
-        options:
-          - all
-          - linux
-          - windows
-          - macos
-      publish_nightly:
-        description: Update the rolling `nightly` prerelease (main only)
-        type: boolean
-        default: false
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: nightly-release
+  group: nightly-publish
   cancel-in-progress: false
 
-env:
-  # ── ccache config (env vars work with ccache 3.x+) ──────────────
-  CCACHE_MAXSIZE: 5G
-  CCACHE_COMPILERCHECK: content
-  CCACHE_NOHASHDIR: "true"
-  CCACHE_SLOPPINESS: pch_defines,time_macros
-  CCACHE_BASEDIR: ${{ github.workspace }}
-  # ── sccache R2 backend ──────────────────────────────────────────
-  SCCACHE_ENDPOINT: ${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-  SCCACHE_BUCKET: ${{ secrets.R2_BUCKET }}
-  SCCACHE_REGION: auto
-  SCCACHE_IDLE_TIMEOUT: "0"
-  SCCACHE_CACHE_SIZE: 10G
-
 jobs:
-  plan:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
-      publish: ${{ steps.plan.outputs.publish }}
-    steps:
-      - name: Resolve build matrix and publish flag
-        id: plan
-        env:
-          PLATFORMS: ${{ inputs.platforms || 'all' }}
-          PUBLISH_INPUT: ${{ inputs.publish_nightly }}
-          REF_NAME: ${{ github.ref_name }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-
-          matrix='[
-            {"platform":"linux","arch":"x64","runner":"ubuntu-latest","config":"release.linux.ci.yaml","timeout":420},
-            {"platform":"windows","arch":"x64","runner":"windows-latest","config":"release.windows.ci.yaml","timeout":420},
-            {"platform":"macos","arch":"arm64","runner":"macos-latest","config":"release.macos.arm64.ci.yaml","timeout":420}
-          ]'
-          if [ "$PLATFORMS" != "all" ]; then
-            matrix="$(jq -c --arg p "$PLATFORMS" '[ .[] | select(.platform == $p) ]' <<<"$matrix")"
-          fi
-
-          publish="false"
-          if [ "$REF_NAME" = "$DEFAULT_BRANCH" ] && [ "$PUBLISH_INPUT" = "true" ]; then
-            publish="true"
-          fi
-
-          {
-            echo "matrix=$matrix"
-            echo "publish=$publish"
-          } >> "$GITHUB_OUTPUT"
-
-  build:
-    needs: plan
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    name: build (${{ matrix.platform }}-${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.timeout }}
-    defaults:
-      run:
-        shell: bash
-    env:
-      PYTHONUTF8: "1"
-      # Override Ninja parallelism; 0 = auto (RAM-capped, see compile module)
-      BROWSEROS_NINJA_JOBS: "0"
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: astral-sh/setup-uv@v8.2.0
-
-      # ── Chromium version & paths ──────────────────────────────
-      - name: Resolve chromium pin and paths
-        id: pin
-        run: |
-          set -euo pipefail
-          . packages/browseros/CHROMIUM_VERSION
-          version="$MAJOR.$MINOR.$BUILD.$PATCH"
-
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            parent="$(cd "$GITHUB_WORKSPACE/.." && pwd -W)"
-          else
-            parent="$(cd "$GITHUB_WORKSPACE/.." && pwd)"
-          fi
-
-          {
-            echo "version=$version"
-            echo "CHROMIUM_ROOT=$parent/chromium"
-            echo "CHROMIUM_SRC=$parent/chromium/src"
-          } >> "$GITHUB_ENV"
-
-      # ── CACHE: depot_tools (indefinite, rarely changes) ───────
-      - name: Cache depot_tools
-        id: cache-depot
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CHROMIUM_ROOT }}/depot_tools
-          key: depot-tools-${{ runner.os }}-${{ runner.arch }}
-
-      # ── CACHE: gclient output + src/.git ─────────────────────
-      # Keyed by Chromium version: invalidates only on version bump.
-      - name: Cache gclient output (third_party, buildtools, .git)
-        id: cache-gclient
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.CHROMIUM_ROOT }}/src/.git
-            ${{ env.CHROMIUM_ROOT }}/src/third_party
-            ${{ env.CHROMIUM_ROOT }}/src/buildtools
-          key: gclient-${{ runner.os }}-${{ runner.arch }}-${{ steps.pin.outputs.version }}
-
-      # ── CACHE: ninja build output (incremental detection) ────
-      - name: Cache build output (ninja log + deps)
-        id: cache-build
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CHROMIUM_ROOT }}/src/out
-          key: build-out-${{ runner.os }}-${{ runner.arch }}-${{ steps.pin.outputs.version }}-${{ github.sha }}
-          restore-keys: |
-            build-out-${{ runner.os }}-${{ runner.arch }}-${{ steps.pin.outputs.version }}-
-            build-out-${{ runner.os }}-${{ runner.arch }}-
-
-      # ── CACHE: ccache directory ──────────────────────────────
-      - name: Cache ccache directory
-        id: cache-ccache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.ccache
-            ~/AppData/Local/ccache
-            ~/Library/Caches/ccache
-          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ steps.pin.outputs.version }}
-
-      # ── SETUP: cache tools ───────────────────────────────────
-      - name: Install ccache (Linux)
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ccache sccache
-
-      - name: Install ccache (macOS)
-        if: matrix.platform == 'macos'
-        run: brew install ccache sccache
-
-      - name: Install ccache (Windows)
-        if: matrix.platform == 'windows'
-        run: |
-          choco install ccache --no-progress
-          choco install sccache --no-progress
-
-      - name: Configure ccache
-        run: |
-          ccache --max-size "$CCACHE_MAXSIZE" || true
-          ccache --zero-stats || true
-
-      - name: Configure sccache R2 backend
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: |
-          if command -v sccache &>/dev/null; then
-            sccache --start-server || true
-            echo "sccache server started, endpoint=$SCCACHE_ENDPOINT bucket=$SCCACHE_BUCKET"
-          else
-            echo "::warning::sccache not installed — falling back to ccache only"
-          fi
-
-      # ── CHROMIUM CHECKOUT ────────────────────────────────────
-      # If the gclient cache hit, src/.git already exists at the
-      # pinned tag → setup_chromium skips the fetch entirely.
-      - name: Ensure chromium checkout at pinned tag
-        run: |
-          set -euo pipefail
-          uv run --project packages/browseros python scripts/ci/setup_chromium.py \
-            --chromium-root "$CHROMIUM_ROOT" --step checkout
-
-      # ── CLEAN: only if build output changed or version bumped ─
-      # Skip full git reset when the previous output is reusable.
-      - name: Clean build artifacts and reset source tree
-        run: |
-          set -euo pipefail
-          if [ -d "$CHROMIUM_SRC/out" ]; then
-            rm -rf "$CHROMIUM_SRC/out"
-            echo "Removed stale out/ directory"
-          fi
-          cd "$CHROMIUM_SRC"
-          git reset --hard HEAD
-          git checkout -- .
-
-      # ── GCLIENT SYNC ─────────────────────────────────────────
-      - name: Sync chromium dependencies (gclient)
-        if: steps.cache-gclient.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          uv run --project packages/browseros python scripts/ci/setup_chromium.py \
-            --chromium-root "$CHROMIUM_ROOT" --step sync
-
-      # ── LINUX SYSTEM DEPS ────────────────────────────────────
-      - name: Install Linux build deps
-        if: matrix.platform == 'linux'
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y libfuse2
-          "$CHROMIUM_SRC/build/install-build-deps.sh" --no-prompt
-
-      # ── BUILD ────────────────────────────────────────────────
-      - name: Build Bharat Browser (unsigned)
-        working-directory: packages/browseros
-        env:
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          # sccache must wrap the compiler.
-          # GN respects CC_WRAPPER / CXX_WRAPPER for the clang toolchain.
-          CC_WRAPPER: sccache
-          CXX_WRAPPER: sccache
-        run: |
-          set -euo pipefail
-          uv run browseros build \
-            --config "build/config/${{ matrix.config }}" \
-            --chromium-src "$CHROMIUM_SRC"
-
-      # ── REPORTING ────────────────────────────────────────────
-      - name: Report cache stats
-        run: |
-          echo "::group::ccache statistics"
-          ccache -s || true
-          echo "::endgroup::"
-          echo "::group::sccache statistics"
-          sccache --show-stats || true
-          echo "::endgroup::"
-
-      - name: Report disk usage
-        if: always()
-        run: df -h || true
-
-      - name: Report build timing (ninja log)
-        if: always()
-        run: |
-          if [ -f "$CHROMIUM_SRC/out/Default_x64/.ninja_log" ]; then
-            tail -5 "$CHROMIUM_SRC/out/Default_x64/.ninja_log"
-          fi
-
-      # ── UPLOAD ───────────────────────────────────────────────
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: bharat-browser-nightly-${{ matrix.platform }}-${{ matrix.arch }}
-          if-no-files-found: error
-          retention-days: 14
-          compression-level: 0
-          path: |
-            packages/browseros/releases/*/*.dmg
-            packages/browseros/releases/*/*.AppImage
-            packages/browseros/releases/*/*.deb
-            packages/browseros/releases/*/*_installer.exe
-            packages/browseros/releases/*/*_installer.zip
-
   publish:
-    needs: [plan, build]
-    if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v6
 
@@ -342,21 +35,30 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          files=(dist/*/*.dmg dist/*/*.AppImage dist/*/*.deb dist/*/*_installer.exe dist/*/*_installer.zip dist/*.dmg dist/*.AppImage dist/*.deb dist/*_installer.exe dist/*_installer.zip)
+
+          # Collect all installer artifacts
+          files=()
+          for ext in dmg AppImage deb exe zip; do
+            while IFS= read -r -d '' f; do files+=("$f"); done < <(find dist -name "*.$ext" -print0 2>/dev/null || true)
+          done
+
           if [ "${#files[@]}" -eq 0 ]; then
-            echo "::error::No artifacts found to publish"
-            exit 1
+            echo "::warning::No artifacts found to publish — build may still be in progress"
+            exit 0
           fi
-          printf 'Publishing:\n%s\n' "${files[@]}"
+
+          printf 'Publishing %d artifacts:\n' "${#files[@]}"
+          printf '  %s\n' "${files[@]}"
 
           notes_file="$(mktemp)"
           cat > "$notes_file" <<EOF
-          Automated unsigned nightly build from \`main\` (commit $GITHUB_SHA).
+          Automated nightly build from \`main\` (commit $GITHUB_SHA).
 
-          These artifacts are NOT code signed or notarized — expect OS warnings on install. For signed builds use the regular releases.
+          These artifacts are NOT code signed or notarized — expect OS warnings on install.
+          For signed builds use the regular releases.
           EOF
 
-          gh release delete nightly --cleanup-tag --yes || true
+          gh release delete nightly --cleanup-tag --yes 2>/dev/null || true
           gh release create nightly \
             --prerelease \
             --latest=false \
