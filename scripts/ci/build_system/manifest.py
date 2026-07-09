@@ -21,7 +21,6 @@ __all__ = [
     "compute_patch_hash",
     "get_compiler_version",
     "get_python_version",
-    "manifest_r2_key",
 ]
 
 WORKFLOW_STATES = frozenset({
@@ -39,8 +38,6 @@ WORKFLOW_STATES = frozenset({
     "FAILED",
     "RECOVERING",
 })
-
-R2_KEY_TEMPLATE = "build-resume/{platform}/build_state.json"
 
 _FIELD_DEFAULTS: Dict[str, Any] = {
     "chromium_version": "",
@@ -208,11 +205,6 @@ def get_python_version() -> str:
     return sys.version.strip()
 
 
-def manifest_r2_key(platform: str) -> str:
-    """Return the S3 / R2 object key for the manifest on *platform*."""
-    return R2_KEY_TEMPLATE.format(platform=platform)
-
-
 # ---------------------------------------------------------------------------
 # BuildManifest
 # ---------------------------------------------------------------------------
@@ -268,14 +260,20 @@ class BuildManifest:
     # -- Serialisation -----------------------------------------------------
 
     def save(self, path: Path) -> None:
-        """Write the manifest as JSON, computing and embedding the checksum."""
+        """Write the manifest as JSON, computing and embedding the checksum.
+
+        Uses write-to-temp-then-rename for crash safety: if the process is
+        killed mid-write the old file (if any) is preserved.
+        """
         self._data["checksum"] = _compute_checksum(self._data)
         self._data["timestamp"] = datetime.now(timezone.utc).isoformat()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
             json.dumps(self._data, indent=2, sort_keys=True, ensure_ascii=False),
             encoding="utf-8",
         )
+        tmp.replace(path)
 
     @classmethod
     def load(cls, path: Path) -> "BuildManifest":

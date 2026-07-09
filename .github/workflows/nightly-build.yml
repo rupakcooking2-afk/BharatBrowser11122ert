@@ -32,7 +32,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: read  # plan job only; build job overrides to write
 
 concurrency:
   group: nightly-build
@@ -74,6 +74,8 @@ jobs:
     name: ${{ matrix.platform }}-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout }}
+    permissions:
+      contents: write  # needed for gh release upload/download
     defaults:
       run:
         shell: bash
@@ -144,13 +146,8 @@ jobs:
 
       # ── State: PATCHING + CONFIGURING ───────────────────────
       - name: State: PATCHING/CONFIGURING — apply patches and gn gen
-        env:
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          # Forced fresh start: clear all R2 state + local out/
+          # Forced fresh start: clear GitHub release + local out/
           if [ "${{ inputs.force }}" = "true" ]; then
             uv run python scripts/ci/resume_build.py \
               --platform ${{ matrix.platform }}-${{ matrix.arch }} \
@@ -165,25 +162,9 @@ jobs:
         working-directory: packages/browseros
 
       # ── State: COMPILING (resumable orchestration) ────────
-      - name: State: COMPILING — install AWS CLI
-        run: |
-          if ! command -v aws &>/dev/null; then
-            case "$(uname -s)" in
-              Linux)  curl -sL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
-                       unzip -q /tmp/awscliv2.zip -d /tmp && sudo /tmp/aws/install --update ;;
-              Darwin)  curl -sL "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o /tmp/awscliv2.pkg
-                       sudo installer -pkg /tmp/awscliv2.pkg -target / ;;
-            esac
-          fi
-          aws --version
-
       - name: State: COMPILING — orchestrate resumable build
         id: orchestrate
         env:
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
           BROWSEROS_NINJA_JOBS: ${{ vars.BROWSEROS_NINJA_JOBS || '' }}
           GITHUB_RUN_NUMBER: ${{ github.run_number }}
           GITHUB_RUN_ID: ${{ github.run_id }}

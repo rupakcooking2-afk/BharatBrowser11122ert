@@ -1,7 +1,7 @@
 """Workflow orchestration state machine for fault-tolerant distributed Chromium builds.
 
 Phase 7 — manages the entire build lifecycle as a deterministic state machine
-with checkpointing, recovery, validation, and R2-based resume.
+with checkpointing, recovery, validation, and GitHub Releases-based resume.
 """
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from .manifest import BuildManifest
 from .checkpoint import CheckpointManager, read_ninja_stats, CHECKPOINT_INTERVAL_MINUTES, CHECKPOINT_INTERVAL_TARGETS
 from .validator import BuildValidator, ValidationResult
 from .recovery import RecoveryManager, auto_repair
-from .uploader import UploadManager
 from .performance import PerformanceTracker
 from .release_validator import ReleaseValidator
 from .disk_manager import DiskManager
@@ -72,7 +71,6 @@ def fast_ninja_count(ninja_log_path: Path) -> int:
     except (OSError, ValueError, subprocess.TimeoutExpired):
         pass
     # fallback: parse the log properly
-    from .checkpoint import NINJA_LOG_HEADER
     try:
         text = ninja_log_path.read_text(encoding="utf-8")
     except OSError:
@@ -80,7 +78,7 @@ def fast_ninja_count(ninja_log_path: Path) -> int:
     count = 0
     for line in text.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("#") or stripped.startswith(NINJA_LOG_HEADER):
+        if not stripped or stripped.startswith("#") or stripped.startswith("start"):
             continue
         count += 1
     return count
@@ -128,7 +126,6 @@ class WorkflowOrchestrator:
         self.checkpoint_mgr = CheckpointManager(platform, build_dir, self.chromium_src)
         self.validator = BuildValidator(self.chromium_src, build_dir, platform)
         self.recovery_mgr = RecoveryManager(platform, build_dir, self.chromium_src)
-        self.uploader = UploadManager(platform)
         self.tracker = PerformanceTracker()
         self.release_validator = ReleaseValidator(self.chromium_src, build_dir, platform)
         self.disk_mgr = DiskManager(self.chromium_src, build_dir, platform)
@@ -136,6 +133,7 @@ class WorkflowOrchestrator:
         self._start_time: float = time.perf_counter()
         self._last_checkpoint_targets: int = 0
         self._last_checkpoint_time: float = time.perf_counter()
+        self._last_checkpoint_wall_time: float = time.time()
         self._last_ninja_command: str = ""
         self._timeout_check_counter: int = 0
 
@@ -249,13 +247,14 @@ class WorkflowOrchestrator:
         self.tracker.start_compile()
         self._last_checkpoint_targets = 0
         self._last_checkpoint_time = time.perf_counter()
+        self._last_checkpoint_wall_time = time.time()
 
         # Restore only when local state is missing/invalid
         ninja_log = self.ninja_log_path
         needs_restore = not ninja_log.is_file() or ninja_log.stat().st_size == 0
-        if needs_restore and self.checkpoint_mgr.get_latest_checkpoint() is not None:
-            logger.info("Restoring latest checkpoint (local .ninja_log missing)")
-            self.checkpoint_mgr.restore_latest(self.chromium_src / self.build_dir)
+        if needs_restore and self.checkpoint_mgr.has_checkpoint():
+            logger.info("Restoring from GitHub checkpoint (local .ninja_log missing)")
+            self.checkpoint_mgr.restore_state()
 
         ninja_path = "autoninja"
         cmd = [ninja_path, "-C", str(self.chromium_src / self.build_dir), "-k", "0"]
@@ -276,9 +275,11 @@ class WorkflowOrchestrator:
             if self.should_stop():
                 logger.warning("Stopping build due to timeout or cancellation")
                 proc.terminate()
-                # Upload incremental state before exiting
-                r2_prefix = f"build-resume/{self.platform}/out"
-                self.uploader.sync_incremental(self.chromium_src / self.build_dir, r2_prefix)
+                # Upload final checkpoint before exiting (best-effort)
+                try:
+                    self.checkpoint_mgr.create_checkpoint(self._last_checkpoint_wall_time)
+                except Exception as exc:
+                    logger.warning("Final checkpoint upload failed: %s", exc)
                 return "FAILED"
 
             retcode = proc.poll()
@@ -294,18 +295,16 @@ class WorkflowOrchestrator:
             ):
                 logger.info("Checkpoint triggered at %d/%d targets", completed, total_targets)
                 try:
-                    # Use INCREMENTAL sync instead of full tarball
-                    r2_prefix = f"build-resume/{self.platform}/out"
-                    self.uploader.sync_incremental(
-                        self.chromium_src / self.build_dir, r2_prefix,
-                    )
-                    # Update manifest counter without R2 API call
-                    ctr = self.manifest.get("checkpoint_counter", 0)
-                    self.manifest["checkpoint_counter"] = ctr + 1
+                    _, ok = self.checkpoint_mgr.create_checkpoint(self._last_checkpoint_wall_time)
                     self._last_checkpoint_targets = completed
                     self._last_checkpoint_time = time.perf_counter()
+                    # Only advance the mtime cutoff when upload actually succeeded.
+                    # Without this guard, a failed checkpoint causes files in
+                    # the window to be permanently omitted from all future deltas.
+                    if ok:
+                        self._last_checkpoint_wall_time = time.time()
                 except Exception as exc:
-                    logger.warning("Checkpoint sync failed: %s", exc)
+                    logger.warning("Checkpoint failed: %s", exc)
 
             if retcode is not None:
                 break
@@ -328,11 +327,13 @@ class WorkflowOrchestrator:
         return "FAILED"
 
     def handle_checkpointing(self) -> str:
-        logger.info("Creating final tarball checkpoint")
+        logger.info("Creating final checkpoint")
         try:
-            self.checkpoint_mgr.create_checkpoint()
+            _, ok = self.checkpoint_mgr.create_checkpoint(self._last_checkpoint_wall_time)
+            if ok:
+                self._last_checkpoint_wall_time = time.time()
         except Exception as exc:
-            logger.warning("Final checkpoint creation failed: %s", exc)
+            logger.warning("Final checkpoint failed: %s", exc)
         return "VERIFYING"
 
     def handle_verifying(self) -> str:

@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""Chromium checkout cache in Cloudflare R2 for runners without WarpCache.
+"""Chromium checkout cache (DEPRECATED — see build_system/github_storage.py).
 
-WarpBuild's cache action does not support Windows runners, and GitHub's
-actions/cache caps at 10GB/repo — useless for a ~60GB checkout. R2 has
-zero egress fees and the repo already ships R2 credentials for release
-uploads, so Windows caches the post-sync tree as a zstd tarball under
-ci-cache/chromium/.
+All resumable-build modules now use GitHub Releases for free storage.
+This file is kept for reference only; no build_system module imports it.
 
 Cache misses (and missing credentials) exit 0 with cache-hit=false so a
 nightly build degrades to a cold checkout instead of failing.
