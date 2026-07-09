@@ -45,7 +45,7 @@ CHECKPOINT_RETENTION = 5
 CHECKPOINT_PREFIX = "checkpoint"
 
 # Ninja log line format: start\texit\toutput\thash
-_NINJA_LOG_HEADER = "start"
+NINJA_LOG_HEADER = "start"
 _NINJA_LOG_SEP = "\t"
 _NINJA_LOG_FIELDS = 4
 
@@ -116,7 +116,7 @@ def read_ninja_stats(
         parts = stripped.split(_NINJA_LOG_SEP)
         if len(parts) < _NINJA_LOG_FIELDS:
             continue
-        if parts[0] == _NINJA_LOG_HEADER:
+        if parts[0] == NINJA_LOG_HEADER:
             continue
         try:
             start = int(parts[0])
@@ -243,13 +243,20 @@ class CheckpointManager:
     def checkpoint_sequence_number(self) -> int:
         """Determine the next checkpoint sequence number.
 
-        Lists existing checkpoints in R2 and returns ``max(seq) + 1``.
-        Returns ``1`` when no checkpoints exist.
+        Reads ``checkpoint_counter`` from the local ``build_state.json``
+        manifest.  Falls back to listing R2 when no manifest is present.
         """
+        build_state = self._build_path / "build_state.json"
+        if build_state.is_file():
+            try:
+                data = json.loads(build_state.read_text(encoding="utf-8"))
+                ctr = data.get("checkpoint_counter", 0)
+                return ctr + 1
+            except (OSError, json.JSONDecodeError):
+                pass
+        # fallback: list R2 (avoided when manifest exists)
         checkpoints = self.list_checkpoints()
-        if not checkpoints:
-            return 1
-        return max(cp["seq"] for cp in checkpoints) + 1
+        return (max(cp["seq"] for cp in checkpoints) + 1) if checkpoints else 1
 
     def get_checkpoint_r2_key(self, seq: str) -> str:
         """Build the R2 object key for a checkpoint sequence string.

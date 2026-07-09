@@ -191,7 +191,7 @@ jobs:
           uv run python scripts/ci/resume_build.py \
             --platform ${{ matrix.platform }}-${{ matrix.arch }} \
             --out-dir out/Default_${{ matrix.arch }} \
-            orchestrate
+            orchestrate --start-state COMPILING
 
       # ── State: PACKAGING (only when compilation complete) ───
       - name: State: PACKAGING — Windows installer
@@ -257,16 +257,3 @@ jobs:
       - name: Report disk usage
         if: always()
         run: df -h || true
-
-  # ── AGGREGATE RESULT ───────────────────────────────────────────────────────
-  result:
-    if: always()
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check all platform build outcomes
-        run: |
-          echo "Build results:"
-          echo "  linux-x64:   ${{ needs.build.outputs.build_complete }}"
-          echo "  windows-x64: ${{ needs.build.outputs.build_complete }}"
-          echo "  macos-arm64: ${{ needs.build.outputs.build_complete }}"

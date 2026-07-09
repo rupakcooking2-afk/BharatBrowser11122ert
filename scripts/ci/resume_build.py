@@ -231,6 +231,7 @@ def cmd_orchestrate(args: argparse.Namespace) -> int:
         chromium_src=args.chromium_src,
         browseros_dir=args.browseros_dir,
         repo_root=args.repo_root,
+        start_state=getattr(args, 'start_state', 'PREPARING'),
     )
     return orch.run()
 
@@ -341,6 +342,11 @@ def main() -> int:
     # ── Phase 7: Orchestrate ────────────────────────────────────
     op = sub.add_parser("orchestrate")
     _make_common_args(op)
+    op.add_argument("--start-state", default="PREPARING",
+                    choices=["IDLE", "PREPARING", "COMPILING",
+                             "VERIFYING", "PACKAGING", "RELEASING",
+                             "COMPLETE", "FAILED", "RECOVERING"],
+                    help="Override initial workflow state (YAML sets COMPILING)")
 
     # ── Phase 8: Dashboard ──────────────────────────────────────
     ddp = sub.add_parser("dashboard")

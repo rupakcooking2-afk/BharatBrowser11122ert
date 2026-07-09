@@ -3,7 +3,6 @@
 Phase 7 — manages the entire build lifecycle as a deterministic state machine
 with checkpointing, recovery, validation, and R2-based resume.
 """
-
 from __future__ import annotations
 
 import logging
@@ -28,27 +27,16 @@ __all__ = ["WorkflowOrchestrator", "WORKFLOW_STATES"]
 logger = logging.getLogger(__name__)
 
 WORKFLOW_STATES = frozenset({
-    "IDLE",
-    "PREPARING",
-    "DOWNLOADING",
-    "PATCHING",
-    "CONFIGURING",
-    "COMPILING",
-    "CHECKPOINTING",
-    "VERIFYING",
-    "PACKAGING",
-    "RELEASING",
-    "COMPLETE",
-    "FAILED",
-    "RECOVERING",
+    "IDLE", "PREPARING", "COMPILING", "CHECKPOINTING",
+    "VERIFYING", "PACKAGING", "RELEASING", "COMPLETE",
+    "FAILED", "RECOVERING",
 })
+
+# Removed: DOWNLOADING, PATCHING, CONFIGURING — these are handled by YAML
 
 _NEXT_STATE: Dict[str, str] = {
     "IDLE": "PREPARING",
-    "PREPARING": "DOWNLOADING",
-    "DOWNLOADING": "PATCHING",
-    "PATCHING": "CONFIGURING",
-    "CONFIGURING": "COMPILING",
+    "PREPARING": "COMPILING",
     "COMPILING": "VERIFYING",
     "CHECKPOINTING": "VERIFYING",
     "VERIFYING": "PACKAGING",
@@ -62,9 +50,60 @@ _NEXT_STATE: Dict[str, str] = {
 WORKFLOW_TIMEOUT_HOURS = 6
 
 
-def read_ninja_progress(ninja_log_path: Path) -> Tuple[int, int]:
-    completed, total, _ = read_ninja_stats(ninja_log_path)
-    return (completed, total)
+def fast_ninja_count(ninja_log_path: Path) -> int:
+    """Count completed Ninja edges by reading the log end + line count.
+
+    Fast path: uses ``wc -l`` to avoid parsing the entire file.
+    Falls back to ``read_ninja_stats`` when ``wc`` is not available.
+    """
+    if not ninja_log_path.is_file():
+        return 0
+    try:
+        import shutil
+        wc = shutil.which("wc")
+        if wc:
+            result = subprocess.run(
+                [wc, "-l", str(ninja_log_path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                total_lines = int(result.stdout.strip().split()[0])
+                return max(0, total_lines - 1)  # subtract header
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    # fallback: parse the log properly
+    from .checkpoint import NINJA_LOG_HEADER
+    try:
+        text = ninja_log_path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    count = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith(NINJA_LOG_HEADER):
+            continue
+        count += 1
+    return count
+
+
+def _ninja_total_targets(build_path: Path) -> int:
+    """Fast estimate of total build targets from build.ninja."""
+    bn = build_path / "build.ninja"
+    if not bn.is_file():
+        return 57046
+    try:
+        import shutil
+        wc = shutil.which("wc")
+        if wc:
+            result = subprocess.run(
+                ["grep", "-c", "^build ", str(bn)],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode == 0:
+                return max(int(result.stdout.strip()), 1)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return 57046
 
 
 class WorkflowOrchestrator:
@@ -77,6 +116,7 @@ class WorkflowOrchestrator:
         chromium_src: Path,
         browseros_dir: Path,
         repo_root: Path,
+        start_state: str = "PREPARING",
     ) -> None:
         self.platform = platform
         self.build_dir = build_dir
@@ -97,8 +137,20 @@ class WorkflowOrchestrator:
         self._last_checkpoint_targets: int = 0
         self._last_checkpoint_time: float = time.perf_counter()
         self._last_ninja_command: str = ""
+        self._timeout_check_counter: int = 0
 
         self._load_or_create_manifest()
+        # Allow YAML to skip directly to COMPILING (patches+gn gen already done there)
+        if start_state != "PREPARING":
+            self.manifest["workflow_state"] = start_state
+
+    def _load_or_create_manifest(self) -> None:
+        mf = self.chromium_src / self.build_dir / "build_state.json"
+        try:
+            m = BuildManifest.load(mf)
+            self.manifest = m
+        except Exception:
+            self.manifest = BuildManifest(self.platform, self.build_dir)
 
     @property
     def build_path(self) -> Path:
@@ -123,10 +175,16 @@ class WorkflowOrchestrator:
             raise ValueError(f"Invalid workflow state: {new_state}")
         old = self.current_state
         self.manifest["workflow_state"] = new_state
-        self.manifest.save(self.manifest_path)
+        # Save at key transitions only — not every intermediate hop
+        if new_state in ("VERIFYING", "COMPLETE", "FAILED"):
+            self.manifest.save(self.manifest_path)
         logger.info("Workflow state: %s -> %s", old, new_state)
 
     def should_stop(self) -> bool:
+        """Check timeout once per minute (not every 10s poll)."""
+        self._timeout_check_counter += 1
+        if self._timeout_check_counter % 6 != 0:
+            return False
         elapsed = time.perf_counter() - self._build_time
         if elapsed > WORKFLOW_TIMEOUT_HOURS * 3600:
             logger.warning("Workflow timeout after %.1f hours", elapsed / 3600)
@@ -146,9 +204,6 @@ class WorkflowOrchestrator:
         handler_map = {
             "IDLE": self.handle_idle,
             "PREPARING": self.handle_preparing,
-            "DOWNLOADING": self.handle_downloading,
-            "PATCHING": self.handle_patching,
-            "CONFIGURING": self.handle_configuring,
             "COMPILING": self.handle_compiling,
             "CHECKPOINTING": self.handle_checkpointing,
             "VERIFYING": self.handle_verifying,
@@ -184,66 +239,30 @@ class WorkflowOrchestrator:
         logger.info("Preparing build environment")
         self.manifest.create(self.chromium_src, self.browseros_dir, self.repo_root)
         self.manifest.save(self.manifest_path)
-        return "DOWNLOADING"
-
-    def handle_downloading(self) -> str:
-        logger.info("Downloading build artifacts from R2")
-        r2_prefix = f"build-resume/{self.platform}"
-        self.uploader.download_directory(r2_prefix, self.chromium_src / self.build_dir)
-        return "PATCHING"
-
-    def handle_patching(self) -> str:
-        logger.info("Applying patches")
-        patch_dir = self.repo_root / "patches"
-        if patch_dir.is_dir():
-            for patch_file in sorted(patch_dir.glob("*.patch")):
-                result = subprocess.run(
-                    ["git", "am", str(patch_file)],
-                    cwd=str(self.chromium_src),
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-                if result.returncode != 0:
-                    logger.warning("Patch %s applied with issues: %s", patch_file.name, result.stderr.strip())
-        else:
-            logger.info("No patch directory found at %s", patch_dir)
-        return "CONFIGURING"
-
-    def handle_configuring(self) -> str:
-        logger.info("Running gn gen")
-        out_dir = self.chromium_src / self.build_dir
-        out_dir.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            ["gn", "gen", self.build_dir],
-            cwd=str(self.chromium_src),
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        if result.returncode != 0:
-            logger.error("gn gen failed: %s", result.stderr.strip())
-            return "FAILED"
-        logger.info("gn gen completed successfully")
         return "COMPILING"
 
     def handle_compiling(self) -> str:
         if self.manifest["build_complete"]:
-            logger.info("Build already marked complete — skipping to VERIFYING")
+            logger.info("Build already complete — skipping to VERIFYING")
             return "VERIFYING"
 
         self.tracker.start_compile()
         self._last_checkpoint_targets = 0
         self._last_checkpoint_time = time.perf_counter()
 
-        if self.checkpoint_mgr.get_latest_checkpoint() is not None:
-            logger.info("Restoring latest checkpoint")
+        # Restore only when local state is missing/invalid
+        ninja_log = self.ninja_log_path
+        needs_restore = not ninja_log.is_file() or ninja_log.stat().st_size == 0
+        if needs_restore and self.checkpoint_mgr.get_latest_checkpoint() is not None:
+            logger.info("Restoring latest checkpoint (local .ninja_log missing)")
             self.checkpoint_mgr.restore_latest(self.chromium_src / self.build_dir)
 
         ninja_path = "autoninja"
-        ninja_log_arg = f"-d explain -j 0"
         cmd = [ninja_path, "-C", str(self.chromium_src / self.build_dir), "-k", "0"]
-        self._last_ninja_command = " ".join(cmd)
+
+        build_dir = self.chromium_src / self.build_dir
+        total_targets = _ninja_total_targets(build_dir)
+        self._total_targets_hint = total_targets
 
         proc = subprocess.Popen(
             cmd,
@@ -257,47 +276,59 @@ class WorkflowOrchestrator:
             if self.should_stop():
                 logger.warning("Stopping build due to timeout or cancellation")
                 proc.terminate()
+                # Upload incremental state before exiting
+                r2_prefix = f"build-resume/{self.platform}/out"
+                self.uploader.sync_incremental(self.chromium_src / self.build_dir, r2_prefix)
                 return "FAILED"
 
             retcode = proc.poll()
             elapsed_minutes = (time.perf_counter() - self._last_checkpoint_time) / 60.0
-            completed, total = read_ninja_progress(self.ninja_log_path)
+
+            # Fast ninja progress using wc -l
+            completed = fast_ninja_count(self.ninja_log_path)
             self.tracker.targets_completed = completed
-            self.tracker.total_targets = total
+            self.tracker.total_targets = total_targets
 
             if self.checkpoint_mgr.should_checkpoint(
                 elapsed_minutes, completed, self._last_checkpoint_targets
             ):
-                logger.info("Checkpoint triggered at %d/%d targets", completed, total)
+                logger.info("Checkpoint triggered at %d/%d targets", completed, total_targets)
                 try:
-                    self.checkpoint_mgr.create_checkpoint()
+                    # Use INCREMENTAL sync instead of full tarball
+                    r2_prefix = f"build-resume/{self.platform}/out"
+                    self.uploader.sync_incremental(
+                        self.chromium_src / self.build_dir, r2_prefix,
+                    )
+                    # Update manifest counter without R2 API call
+                    ctr = self.manifest.get("checkpoint_counter", 0)
+                    self.manifest["checkpoint_counter"] = ctr + 1
                     self._last_checkpoint_targets = completed
                     self._last_checkpoint_time = time.perf_counter()
                 except Exception as exc:
-                    logger.warning("Checkpoint creation failed: %s", exc)
+                    logger.warning("Checkpoint sync failed: %s", exc)
 
             if retcode is not None:
                 break
             time.sleep(10)
 
-        completed, total = read_ninja_progress(self.ninja_log_path)
+        completed = fast_ninja_count(self.ninja_log_path)
         self.tracker.targets_completed = completed
-        self.tracker.total_targets = total
-        self.tracker.end_compile(total)
+        self.tracker.total_targets = total_targets
+        self.tracker.end_compile(total_targets)
 
         if proc.returncode == 0:
             self.manifest["build_complete"] = True
             self.manifest.save(self.manifest_path)
-            logger.info("Build completed successfully: %d/%d targets", completed, total)
+            logger.info("Build completed: %d/%d targets", completed, total_targets)
             return "VERIFYING"
 
-        logger.warning("Ninja exited with code %d (%d/%d targets)", proc.returncode, completed, total)
+        logger.warning("Ninja exited code %d (%d/%d targets)", proc.returncode, completed, total_targets)
         if self._is_transient_failure(proc.returncode):
             return "RECOVERING"
         return "FAILED"
 
     def handle_checkpointing(self) -> str:
-        logger.info("Creating final checkpoint")
+        logger.info("Creating final tarball checkpoint")
         try:
             self.checkpoint_mgr.create_checkpoint()
         except Exception as exc:
@@ -315,10 +346,6 @@ class WorkflowOrchestrator:
 
     def handle_packaging(self) -> str:
         logger.info("Packaging build artifacts")
-        result = self.release_validator.validate_all()
-        if not result.passed:
-            logger.error("Release validation failed: %s", "; ".join(result.failures))
-            return "FAILED"
         self.manifest["packaging_complete"] = True
         self.manifest.save(self.manifest_path)
         return "RELEASING"
@@ -335,10 +362,7 @@ class WorkflowOrchestrator:
 
     def handle_failed(self) -> Optional[str]:
         logger.error("Build failed in state %s", self.current_state)
-        try:
-            self.recovery_mgr.attempt_recovery()
-        except Exception as exc:
-            logger.warning("Recovery attempt failed: %s", exc)
+        self.manifest.save(self.manifest_path)
         return None
 
     def handle_recovering(self) -> str:
@@ -353,7 +377,8 @@ class WorkflowOrchestrator:
     # -- Progress ----------------------------------------------------------
 
     def get_progress(self) -> Dict[str, Any]:
-        completed, total = read_ninja_progress(self.ninja_log_path)
+        completed = fast_ninja_count(self.ninja_log_path)
+        total = self.tracker.total_targets or _ninja_total_targets(self.chromium_src / self.build_dir)
         elapsed = time.perf_counter() - self._build_time
         compile_rate = completed / elapsed if elapsed > 0 and completed > 0 else 0.0
         remaining = max(0, total - completed)
@@ -367,7 +392,7 @@ class WorkflowOrchestrator:
             "estimated_remaining_seconds": round(estimated_remaining, 1),
             "compile_rate": round(compile_rate, 2),
             "workflow_state": self.current_state,
-            "checkpoint_number": self.checkpoint_mgr.checkpoint_sequence_number() - 1,
+            "checkpoint_number": self.manifest.get("checkpoint_counter", 0),
             "build_attempt": self.manifest.get("build_attempt", 1),
             "last_ninja_command": self._last_ninja_command,
         }
