@@ -150,8 +150,9 @@ jobs:
           # Forced fresh start: clear GitHub release + local out/
           if [ "${{ inputs.force }}" = "true" ]; then
             uv run python scripts/ci/resume_build.py \
+              clear \
               --platform ${{ matrix.platform }}-${{ matrix.arch }} \
-              --out-dir out/Default_${{ matrix.arch }} clear
+              --out-dir out/Default_${{ matrix.arch }}
             rm -rf "$CHROMIUM_SRC/out"
           fi
           # Run patches + configure (idempotent; gn gen regenerates as needed)
@@ -170,9 +171,10 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           uv run python scripts/ci/resume_build.py \
+            orchestrate \
             --platform ${{ matrix.platform }}-${{ matrix.arch }} \
             --out-dir out/Default_${{ matrix.arch }} \
-            orchestrate --start-state COMPILING
+            --start-state COMPILING
 
       # ── State: PACKAGING (only when compilation complete) ───
       - name: "State: PACKAGING — Windows installer"
