@@ -89,7 +89,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v8.2.0
 
-      - name: State: PREPARING — resolve paths
+      - name: "State: PREPARING — resolve paths"
         id: paths
         run: |
           . packages/browseros/CHROMIUM_VERSION
@@ -126,7 +126,7 @@ jobs:
           key: ccache-${{ runner.os }}-${{ runner.arch }}
 
       # ── State: DOWNLOADING ──────────────────────────────────
-      - name: State: DOWNLOADING — ensure Chromium checkout
+      - name: "State: DOWNLOADING — ensure Chromium checkout"
         run: |
           uv run python scripts/ci/setup_chromium.py \
             --chromium-root "$CHROMIUM_ROOT" --step checkout
@@ -145,7 +145,7 @@ jobs:
           "$CHROMIUM_SRC/build/install-build-deps.sh" --no-prompt
 
       # ── State: PATCHING + CONFIGURING ───────────────────────
-      - name: State: PATCHING/CONFIGURING — apply patches and gn gen
+      - name: "State: PATCHING/CONFIGURING — apply patches and gn gen"
         run: |
           # Forced fresh start: clear GitHub release + local out/
           if [ "${{ inputs.force }}" = "true" ]; then
@@ -162,7 +162,7 @@ jobs:
         working-directory: packages/browseros
 
       # ── State: COMPILING (resumable orchestration) ────────
-      - name: State: COMPILING — orchestrate resumable build
+      - name: "State: COMPILING — orchestrate resumable build"
         id: orchestrate
         env:
           BROWSEROS_NINJA_JOBS: ${{ vars.BROWSEROS_NINJA_JOBS || '' }}
@@ -175,7 +175,7 @@ jobs:
             orchestrate --start-state COMPILING
 
       # ── State: PACKAGING (only when compilation complete) ───
-      - name: State: PACKAGING — Windows installer
+      - name: "State: PACKAGING — Windows installer"
         if: matrix.platform == 'windows' && steps.orchestrate.outcome == 'success'
         run: |
           uv run browseros build \
@@ -184,7 +184,7 @@ jobs:
             --modules mini_installer,package_windows
         working-directory: packages/browseros
 
-      - name: State: PACKAGING — Linux AppImage + deb
+      - name: "State: PACKAGING — Linux AppImage + deb"
         if: matrix.platform == 'linux' && steps.orchestrate.outcome == 'success'
         run: |
           uv run browseros build \
@@ -193,7 +193,7 @@ jobs:
             --modules package_linux
         working-directory: packages/browseros
 
-      - name: State: PACKAGING — macOS DMG
+      - name: "State: PACKAGING — macOS DMG"
         if: matrix.platform == 'macos' && steps.orchestrate.outcome == 'success'
         run: |
           uv run browseros build \
@@ -203,7 +203,7 @@ jobs:
         working-directory: packages/browseros
 
       # ── State: RELEASING (upload artifacts) ─────────────────
-      - name: State: RELEASING — upload artifacts
+      - name: "State: RELEASING — upload artifacts"
         id: upload-artifacts
         if: steps.orchestrate.outcome == 'success'
         uses: actions/upload-artifact@v4
