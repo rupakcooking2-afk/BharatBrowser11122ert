@@ -1,0 +1,240 @@
+name: Build Bharat Browser (Resumable)
+
+# Production-grade fault-tolerant distributed build system.
+# Compiles Bharat Browser across multiple GitHub Actions runs with
+# automatic checkpointing, manifest validation, and intelligent recovery.
+#
+# Workflow states (coarse-grained at YAML level):
+#   PREPARING → DOWNLOADING → PATCHING → CONFIGURING → COMPILING
+#   → (packaging steps) → RELEASING → COMPLETE
+#
+# The COMPILING state delegates to resume_build.py orchestrate which
+# manages fine-grained sub-states (compiling/checkpointing/verifying)
+# and handles the full resume/checkpoint/recovery lifecycle.
+
+on:
+  schedule:
+    - cron: "0 0,6,12,18 * * *"
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: Platforms to build
+        type: choice
+        default: all
+        options:
+          - all
+          - linux
+          - windows
+          - macos
+      force:
+        description: Clear previous build state and start fresh
+        type: boolean
+        default: false
+
+permissions:
+  contents: read  # plan job only; build job overrides to write
+
+concurrency:
+  group: nightly-build
+  cancel-in-progress: false
+
+env:
+  PYTHONUTF8: "1"
+  CCACHE_MAXSIZE: 5G
+  CCACHE_COMPILERCHECK: content
+  CCACHE_NOHASHDIR: "true"
+  CCACHE_SLOPPINESS: pch_defines,time_macros
+  CCACHE_BASEDIR: ${{ github.workspace }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - id: matrix
+        env:
+          PLATFORMS: ${{ inputs.platforms || 'all' }}
+        run: |
+          all='[{"platform":"linux","arch":"x64","runner":"ubuntu-latest","config":"release.linux.ci.yaml","timeout":420},{"platform":"windows","arch":"x64","runner":"windows-latest","config":"release.windows.ci.yaml","timeout":420},{"platform":"macos","arch":"arm64","runner":"macos-latest","config":"release.macos.arm64.ci.yaml","timeout":420}]'
+          if [ "$PLATFORMS" = "all" ]; then echo "matrix=$all" >> "$GITHUB_OUTPUT"
+          else
+            filtered=$(printf '%s' "$all" | jq -c --arg p "$PLATFORMS" '[ .[] | select(.platform == $p) ]')
+            echo "matrix=$filtered" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── BUILD JOB ─────────────────────────────────────────────────────────────
+  # Orchestrates the full build lifecycle for one platform.
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    permissions:
+      contents: write  # needed for gh release upload/download
+    defaults:
+      run:
+        shell: bash
+
+    outputs:
+      build_complete: ${{ steps.orchestrate.outcome }}
+      artifacts: ${{ steps.upload-artifacts.outcome || '' }}
+
+    steps:
+      # ── State: PREPARING ────────────────────────────────────
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v8.2.0
+
+      - name: "State: PREPARING — resolve paths"
+        id: paths
+        run: |
+          . packages/browseros/CHROMIUM_VERSION
+          resolved_root="$(cd "$GITHUB_WORKSPACE/.." && pwd)/chromium"
+          resolved_src="$resolved_root/src"
+          echo "CHROMIUM_ROOT=$resolved_root" >> "$GITHUB_ENV"
+          echo "CHROMIUM_SRC=$resolved_src" >> "$GITHUB_ENV"
+          echo "version=$MAJOR.$MINOR.$BUILD.$PATCH" >> "$GITHUB_ENV"
+          echo "out_dir=out/Default_${{ matrix.arch }}" >> "$GITHUB_ENV"
+
+      - name: Cache depot_tools
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CHROMIUM_ROOT }}/depot_tools
+          key: depot-tools-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Cache gclient output
+        id: cache-gclient
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CHROMIUM_ROOT }}/src/.git
+            ${{ env.CHROMIUM_ROOT }}/src/third_party
+            ${{ env.CHROMIUM_ROOT }}/src/buildtools
+          key: gclient-${{ runner.os }}-${{ runner.arch }}-${{ steps.paths.outputs.version }}
+
+      - name: Cache ccache directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ccache
+            ~/AppData/Local/ccache
+            ~/Library/Caches/ccache
+          key: ccache-${{ runner.os }}-${{ runner.arch }}
+
+      # ── State: DOWNLOADING ──────────────────────────────────
+      - name: "State: DOWNLOADING — ensure Chromium checkout"
+        run: |
+          uv run python scripts/ci/setup_chromium.py \
+            --chromium-root "$CHROMIUM_ROOT" --step checkout
+
+      - name: Sync Chromium dependencies
+        if: steps.cache-gclient.outputs.cache-hit != 'true'
+        run: |
+          uv run python scripts/ci/setup_chromium.py \
+            --chromium-root "$CHROMIUM_ROOT" --step sync
+
+      - name: Install Linux build deps
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2
+          "$CHROMIUM_SRC/build/install-build-deps.sh" --no-prompt
+
+      # ── State: PATCHING + CONFIGURING ───────────────────────
+      - name: "State: PATCHING/CONFIGURING — apply patches and gn gen"
+        run: |
+          # Forced fresh start: clear GitHub release + local out/
+          if [ "${{ inputs.force }}" = "true" ]; then
+            uv run python scripts/ci/resume_build.py \
+              --platform ${{ matrix.platform }}-${{ matrix.arch }} \
+              --out-dir out/Default_${{ matrix.arch }} clear
+            rm -rf "$CHROMIUM_SRC/out"
+          fi
+          # Run patches + configure (idempotent; gn gen regenerates as needed)
+          uv run browseros build \
+            --config "build/config/${{ matrix.config }}" \
+            --chromium-src "$CHROMIUM_SRC" \
+            --modules "download_resources,resources,bundled_extensions,chromium_replace,string_replaces,series_patches,patches,configure"
+        working-directory: packages/browseros
+
+      # ── State: COMPILING (resumable orchestration) ────────
+      - name: "State: COMPILING — orchestrate resumable build"
+        id: orchestrate
+        env:
+          BROWSEROS_NINJA_JOBS: ${{ vars.BROWSEROS_NINJA_JOBS || '' }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          uv run python scripts/ci/resume_build.py \
+            --platform ${{ matrix.platform }}-${{ matrix.arch }} \
+            --out-dir out/Default_${{ matrix.arch }} \
+            orchestrate --start-state COMPILING
+
+      # ── State: PACKAGING (only when compilation complete) ───
+      - name: "State: PACKAGING — Windows installer"
+        if: matrix.platform == 'windows' && steps.orchestrate.outcome == 'success'
+        run: |
+          uv run browseros build \
+            --config "build/config/${{ matrix.config }}" \
+            --chromium-src "$CHROMIUM_SRC" \
+            --modules mini_installer,package_windows
+        working-directory: packages/browseros
+
+      - name: "State: PACKAGING — Linux AppImage + deb"
+        if: matrix.platform == 'linux' && steps.orchestrate.outcome == 'success'
+        run: |
+          uv run browseros build \
+            --config "build/config/${{ matrix.config }}" \
+            --chromium-src "$CHROMIUM_SRC" \
+            --modules package_linux
+        working-directory: packages/browseros
+
+      - name: "State: PACKAGING — macOS DMG"
+        if: matrix.platform == 'macos' && steps.orchestrate.outcome == 'success'
+        run: |
+          uv run browseros build \
+            --config "build/config/${{ matrix.config }}" \
+            --chromium-src "$CHROMIUM_SRC" \
+            --modules package_macos
+        working-directory: packages/browseros
+
+      # ── State: RELEASING (upload artifacts) ─────────────────
+      - name: "State: RELEASING — upload artifacts"
+        id: upload-artifacts
+        if: steps.orchestrate.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bharat-browser-${{ matrix.platform }}-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          path: |
+            packages/browseros/releases/*/*.dmg
+            packages/browseros/releases/*/*.AppImage
+            packages/browseros/releases/*/*.deb
+            packages/browseros/releases/*/*_installer.exe
+            packages/browseros/releases/*/*_installer.zip
+
+      # ── Reporting ───────────────────────────────────────────
+      - name: Report ccache stats
+        if: always()
+        run: ccache -s || true
+
+      - name: Report build timing
+        if: always()
+        run: |
+          outdir="$CHROMIUM_SRC/out/Default_${{ matrix.arch }}"
+          if [ -f "$outdir/.ninja_log" ]; then
+            echo "=== ninja log (last 5 edges) ==="
+            tail -5 "$outdir/.ninja_log"
+          fi
+          echo "=== out/ size ==="
+          du -sh "$outdir" 2>/dev/null || echo "N/A"
+
+      - name: Report disk usage
+        if: always()
+        run: df -h || true
