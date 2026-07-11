@@ -24,6 +24,7 @@ from typing import Optional, List, Dict, Any, Tuple
 
 from .context import Context
 from .env import EnvConfig
+from .paths import get_package_root
 from .utils import get_platform_arch, log_info
 
 VALID_ARCHITECTURES = {"x64", "arm64", "universal"}
@@ -139,11 +140,23 @@ def _resolve_config_mode(
         )
     log_info(f"✓ CONFIG MODE: build_type={build_type} ({build_type_source})")
 
+    # gn_flags_file: from YAML gn_flags.file (top-level section)
+    gn_flags_section = yaml_config.get("gn_flags", {})
+    gn_flags_file: Optional[Path] = None
+    if isinstance(gn_flags_section, dict):
+        gn_flags_file_str = gn_flags_section.get("file")
+        if gn_flags_file_str:
+            gn_flags_file = Path(gn_flags_file_str)
+            if not gn_flags_file.is_absolute():
+                gn_flags_file = get_package_root() / gn_flags_file
+            log_info(f"✓ CONFIG MODE: gn_flags_file={gn_flags_file} (yaml)")
+
     return [
         Context(
             chromium_src=chromium_src,
             architecture=arch,
             build_type=build_type,
+            gn_flags_file=gn_flags_file,
         )
         for arch in architectures
     ]

@@ -82,6 +82,44 @@ class ResolveConfigConfigModeTest(unittest.TestCase):
             contexts = resolve_config(cli_args={}, yaml_config=yaml_config)
             self.assertEqual(contexts[0].build_type, "debug")
 
+    def test_gn_flags_file_from_yaml_resolved_relative_to_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = MockChromium(Path(tmp))
+            yaml_config = {
+                "build": {
+                    "chromium_src": str(m.src),
+                    "architecture": "x64",
+                    "type": "release",
+                },
+                "gn_flags": {
+                    "file": "build/config/gn/flags.linux.release.ci.gn"
+                },
+            }
+            contexts = resolve_config(cli_args={}, yaml_config=yaml_config)
+            flags = contexts[0].paths.gn_flags_file
+            self.assertIsNotNone(flags)
+            self.assertIn(
+                "build/config/gn/flags.linux.release.ci.gn",
+                str(flags).replace("\\", "/"),
+            )
+            self.assertTrue(Path(flags).is_absolute())
+
+    def test_gn_flags_file_absent_falls_back_to_auto(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = MockChromium(Path(tmp))
+            yaml_config = {
+                "build": {
+                    "chromium_src": str(m.src),
+                    "architecture": "x64",
+                    "type": "release",
+                },
+            }
+            contexts = resolve_config(cli_args={}, yaml_config=yaml_config)
+            flags = contexts[0].paths.gn_flags_file
+            self.assertIsNotNone(flags)
+            # Should be flags.{platform}.release.gn (e.g. flags.win32.release.gn)
+            self.assertIn(".release.gn", str(flags))
+
 
 class ResolveConfigDirectModeTest(unittest.TestCase):
     def test_missing_chromium_src_everywhere_raises(self):

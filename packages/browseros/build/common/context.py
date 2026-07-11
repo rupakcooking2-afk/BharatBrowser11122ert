@@ -208,6 +208,10 @@ class Context:
     SPARKLE_VERSION: str = "2.7.0"
     WINSPARKLE_VERSION: str = "0.9.3"
 
+    # GN flags file override (from YAML gn_flags.file or CLI)
+    # If None, auto-computed as flags.{platform}.{build_type}.gn
+    gn_flags_file: Optional[Path] = None
+
     # Legacy artifacts dict - kept for backward compatibility
     # New code should use ctx.artifacts (ArtifactRegistry) instead
     artifacts: Dict[str, List[Path]] = field(default_factory=dict)
@@ -225,12 +229,12 @@ class Context:
     def __post_init__(self):
         """Load version files and set platform/architecture-specific configurations"""
         # Initialize new sub-components
-        self.paths = PathConfig(self.root_dir, self.chromium_src)
+        self.paths = PathConfig(self.root_dir, self.chromium_src, self.gn_flags_file)
         self.build = BuildConfig(self.architecture, self.build_type)
         self.artifact_registry = ArtifactRegistry()  # New artifact system
         self.env = EnvConfig()
 
-        # Set default gn_flags_file if not provided
+        # Auto-compute gn_flags_file if not provided (via YAML or field)
         if not self.paths.gn_flags_file:
             self.paths.gn_flags_file = self.get_gn_flags_file()
 

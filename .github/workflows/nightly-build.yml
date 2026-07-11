@@ -156,7 +156,7 @@ jobs:
           fi
           # Run patches + configure (idempotent; gn gen regenerates as needed)
           uv run browseros build \
-            --config "build/config/${{ matrix.config }}" \
+            --build-type release \
             --chromium-src "$CHROMIUM_SRC" \
             --modules "download_resources,resources,bundled_extensions,chromium_replace,string_replaces,series_patches,patches,configure"
         working-directory: packages/browseros
@@ -179,7 +179,7 @@ jobs:
         if: matrix.platform == 'windows' && steps.orchestrate.outcome == 'success'
         run: |
           uv run browseros build \
-            --config "build/config/${{ matrix.config }}" \
+            --build-type release \
             --chromium-src "$CHROMIUM_SRC" \
             --modules mini_installer,package_windows
         working-directory: packages/browseros
@@ -188,7 +188,7 @@ jobs:
         if: matrix.platform == 'linux' && steps.orchestrate.outcome == 'success'
         run: |
           uv run browseros build \
-            --config "build/config/${{ matrix.config }}" \
+            --build-type release \
             --chromium-src "$CHROMIUM_SRC" \
             --modules package_linux
         working-directory: packages/browseros
@@ -197,7 +197,7 @@ jobs:
         if: matrix.platform == 'macos' && steps.orchestrate.outcome == 'success'
         run: |
           uv run browseros build \
-            --config "build/config/${{ matrix.config }}" \
+            --build-type release \
             --chromium-src "$CHROMIUM_SRC" \
             --modules package_macos
         working-directory: packages/browseros
