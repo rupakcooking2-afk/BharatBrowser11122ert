@@ -25,6 +25,13 @@ import os
 import sys
 from pathlib import Path
 
+# Ensure the repository root is on sys.path so that
+# "from scripts.ci.build_system.xxx import YYY" resolves correctly
+# when resume_build.py is invoked as a script.
+_repo_root = Path(__file__).resolve().parents[2]
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
 
 def _make_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--platform", required=True)
@@ -293,21 +300,35 @@ def main() -> int:
 
 
 def _resolve_path_args(args: argparse.Namespace) -> None:
+    # Evaluate any callable defaults that argparse stored instead of calling
+    for attr in ("chromium_src", "browseros_dir", "repo_root"):
+        val = getattr(args, attr, None)
+        if callable(val):
+            setattr(args, attr, val())
+
     if not args.chromium_src or str(args.chromium_src) == ".":
         args.chromium_src = Path(os.environ.get(
             "CHROMIUM_SRC",
             Path.cwd().parent / "chromium" / "src",
-        ))
+        )).resolve()
+    else:
+        args.chromium_src = Path(args.chromium_src).resolve()
+
     if not args.browseros_dir or str(args.browseros_dir) == ".":
         args.browseros_dir = Path(os.environ.get(
             "BROWSEROS_DIR",
             Path.cwd() / "packages" / "browseros",
-        ))
+        )).resolve()
+    else:
+        args.browseros_dir = Path(args.browseros_dir).resolve()
+
     if not args.repo_root or str(args.repo_root) == ".":
         args.repo_root = Path(os.environ.get(
             "REPO_ROOT",
             Path.cwd(),
-        ))
+        )).resolve()
+    else:
+        args.repo_root = Path(args.repo_root).resolve()
 
 
 if __name__ == "__main__":

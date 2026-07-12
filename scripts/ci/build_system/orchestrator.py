@@ -118,14 +118,23 @@ class WorkflowOrchestrator:
     ) -> None:
         self.platform = platform
         self.build_dir = build_dir
-        self.chromium_src = Path(chromium_src)
-        self.browseros_dir = Path(browseros_dir)
-        self.repo_root = Path(repo_root)
+        for _name, _val in (
+            ("chromium_src", chromium_src),
+            ("browseros_dir", browseros_dir),
+            ("repo_root", repo_root),
+        ):
+            if callable(_val):
+                raise RuntimeError(
+                    f"Unevaluated callable received for path argument: {_name}"
+                )
+        self.chromium_src = Path(chromium_src).resolve()
+        self.browseros_dir = Path(browseros_dir).resolve()
+        self.repo_root = Path(repo_root).resolve()
 
         self.manifest = BuildManifest(platform, build_dir)
         self.checkpoint_mgr = CheckpointManager(platform, build_dir, self.chromium_src)
         self.validator = BuildValidator(self.chromium_src, build_dir, platform)
-        self.recovery_mgr = RecoveryManager(platform, build_dir, self.chromium_src)
+        self.recovery_mgr = RecoveryManager(self.chromium_src, build_dir, platform)
         self.tracker = PerformanceTracker()
         self.release_validator = ReleaseValidator(self.chromium_src, build_dir, platform)
         self.disk_mgr = DiskManager(self.chromium_src, build_dir, platform)
