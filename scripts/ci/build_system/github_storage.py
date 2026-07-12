@@ -93,7 +93,12 @@ class GitHubReleaseStore:
     # -- Release lifecycle ------------------------------------------------
 
     def ensure_release(self) -> None:
-        """Create the checkpoint release if it does not exist."""
+        """Create the checkpoint release if it does not exist.
+
+        This method must NEVER raise — any failure is logged and the caller
+        will discover the issue when the actual upload fails (which is handled
+        as a non-blocking warning in the compilation loop).
+        """
         try:
             self._gh(["release", "view", self.release_tag], timeout=30)
         except (subprocess.CalledProcessError, RuntimeError):
@@ -105,11 +110,8 @@ class GitHubReleaseStore:
                     "--notes", "Rolling release for resumable builds — auto-managed",
                 ], timeout=30)
                 logger.info("Created checkpoint release %s", self.release_tag)
-            except subprocess.CalledProcessError as exc:
-                if exc.returncode == 4:
-                    logger.info("Release tag already exists — continuing with existing release")
-                else:
-                    raise
+            except (subprocess.CalledProcessError, RuntimeError) as exc:
+                logger.warning("Could not create release (upload will be attempted regardless): %s", exc)
 
     def release_exists(self) -> bool:
         """Return ``True`` when the checkpoint release exists."""
