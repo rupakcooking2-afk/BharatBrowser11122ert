@@ -48,6 +48,7 @@ _NEXT_STATE: Dict[str, str] = {
 }
 
 WORKFLOW_TIMEOUT_HOURS = 6
+MAX_CHECKPOINT_RETRIES = 3
 
 
 def fast_ninja_count(ninja_log_path: Path) -> int:
@@ -146,6 +147,8 @@ class WorkflowOrchestrator:
         self._last_checkpoint_wall_time: float = time.time()
         self._last_ninja_command: str = ""
         self._timeout_check_counter: int = 0
+        self._checkpoint_retries: int = 0
+        self._checkpoint_disabled: bool = False
 
         self._load_or_create_manifest()
         # Allow YAML to skip directly to COMPILING (patches+gn gen already done there)
@@ -292,6 +295,8 @@ class WorkflowOrchestrator:
         self._last_checkpoint_targets = 0
         self._last_checkpoint_time = time.perf_counter()
         self._last_checkpoint_wall_time = time.time()
+        self._checkpoint_retries = 0
+        self._checkpoint_disabled = False
 
         # Restore only when local state is missing/invalid
         ninja_log = self.ninja_log_path
@@ -334,21 +339,38 @@ class WorkflowOrchestrator:
             self.tracker.targets_completed = completed
             self.tracker.total_targets = total_targets
 
-            if self.checkpoint_mgr.should_checkpoint(
+            if not self._checkpoint_disabled and self.checkpoint_mgr.should_checkpoint(
                 elapsed_minutes, completed, self._last_checkpoint_targets
             ):
                 logger.info("Checkpoint triggered at %d/%d targets", completed, total_targets)
                 try:
                     _, ok = self.checkpoint_mgr.create_checkpoint(self._last_checkpoint_wall_time)
-                    self._last_checkpoint_targets = completed
-                    self._last_checkpoint_time = time.perf_counter()
+                except Exception as exc:
+                    logger.warning("Checkpoint failed: %s", exc)
+                    ok = False
+
+                # Advance counters on every attempt (even failure) to prevent
+                # an infinite retry loop when should_checkpoint keeps returning
+                # True because _last_checkpoint_targets / _last_checkpoint_time
+                # were never updated.
+                self._last_checkpoint_targets = completed
+                self._last_checkpoint_time = time.perf_counter()
+
+                if ok:
                     # Only advance the mtime cutoff when upload actually succeeded.
                     # Without this guard, a failed checkpoint causes files in
                     # the window to be permanently omitted from all future deltas.
-                    if ok:
-                        self._last_checkpoint_wall_time = time.time()
-                except Exception as exc:
-                    logger.warning("Checkpoint failed: %s", exc)
+                    self._last_checkpoint_wall_time = time.time()
+                    self._checkpoint_retries = 0
+                else:
+                    self._checkpoint_retries += 1
+                    if self._checkpoint_retries >= MAX_CHECKPOINT_RETRIES:
+                        logger.warning(
+                            "Checkpoint failed %d consecutive times — disabling "
+                            "all future checkpoints for this build",
+                            self._checkpoint_retries,
+                        )
+                        self._checkpoint_disabled = True
 
             if retcode is not None:
                 break

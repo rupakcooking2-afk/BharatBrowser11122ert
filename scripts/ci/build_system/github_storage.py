@@ -97,13 +97,19 @@ class GitHubReleaseStore:
         try:
             self._gh(["release", "view", self.release_tag], timeout=30)
         except (subprocess.CalledProcessError, RuntimeError):
-            self._gh([
-                "release", "create", self.release_tag,
-                "--latest=false",
-                "--title", f"Build Checkpoint ({self.platform})",
-                "--notes", "Rolling release for resumable builds — auto-managed",
-            ], timeout=30)
-            logger.info("Created checkpoint release %s", self.release_tag)
+            try:
+                self._gh([
+                    "release", "create", self.release_tag,
+                    "--latest=false",
+                    "--title", f"Build Checkpoint ({self.platform})",
+                    "--notes", "Rolling release for resumable builds — auto-managed",
+                ], timeout=30)
+                logger.info("Created checkpoint release %s", self.release_tag)
+            except subprocess.CalledProcessError as exc:
+                if exc.returncode == 4:
+                    logger.info("Release tag already exists — continuing with existing release")
+                else:
+                    raise
 
     def release_exists(self) -> bool:
         """Return ``True`` when the checkpoint release exists."""
