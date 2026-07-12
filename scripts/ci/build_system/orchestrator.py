@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -248,6 +249,40 @@ class WorkflowOrchestrator:
         self.manifest.save(self.manifest_path)
         return "COMPILING"
 
+    @staticmethod
+    def _locate_autoninja(chromium_src: Path) -> Optional[str]:
+        """Locate the autoninja script, searching PATH then depot_tools."""
+        autoninja = shutil.which("autoninja")
+        if autoninja:
+            logger.info("autoninja found on PATH: %s", autoninja)
+            return autoninja
+
+        # depot_tools lives alongside chromium_src: <chromium_root>/depot_tools
+        depot_tools = chromium_src.parent / "depot_tools"
+        if depot_tools.is_dir():
+            # On Windows depot_tools uses .bat; on Linux/Mac it's a shell script
+            candidates = [
+                depot_tools / "autoninja.bat",
+                depot_tools / "autoninja.cmd",
+                depot_tools / "autoninja",
+                depot_tools / "autoninja.py",
+            ]
+            for candidate in candidates:
+                if candidate.is_file():
+                    logger.info("autoninja found in depot_tools: %s", candidate)
+                    # Add depot_tools to PATH so child processes find goma/gn/ etc.
+                    os.environ["PATH"] = str(depot_tools) + os.pathsep + os.environ.get("PATH", "")
+                    return str(candidate)
+
+        raise RuntimeError(
+            "autoninja not found on PATH or in depot_tools\n\n"
+            "  Searched:\n"
+            f"    PATH entries\n"
+            f"    {depot_tools / 'autoninja*'}\n\n"
+            "  Ensure depot_tools is installed and on PATH.\n"
+            "  Run:  python scripts/ci/setup_chromium.py --step checkout\n"
+        )
+
     def handle_compiling(self) -> str:
         if self.manifest["build_complete"]:
             logger.info("Build already complete — skipping to VERIFYING")
@@ -265,7 +300,7 @@ class WorkflowOrchestrator:
             logger.info("Restoring from GitHub checkpoint (local .ninja_log missing)")
             self.checkpoint_mgr.restore_state()
 
-        ninja_path = "autoninja"
+        ninja_path = self._locate_autoninja(self.chromium_src)
         cmd = [ninja_path, "-C", str(self.chromium_src / self.build_dir), "-k", "0"]
 
         build_dir = self.chromium_src / self.build_dir

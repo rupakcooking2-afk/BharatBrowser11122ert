@@ -97,6 +97,8 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
 
 
 def cmd_orchestrate(args: argparse.Namespace) -> int:
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     from scripts.ci.build_system.orchestrator import WorkflowOrchestrator
     orch = WorkflowOrchestrator(
         platform=args.platform,
