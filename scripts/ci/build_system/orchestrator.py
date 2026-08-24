@@ -142,6 +142,9 @@ class WorkflowOrchestrator:
         self.disk_mgr = DiskManager(self.chromium_src, build_dir, platform)
 
         self._start_time: float = time.perf_counter()
+        # Set here so get_progress()/dashboard callers work even before
+        # run() resets it.
+        self._build_time_value: float = time.perf_counter()
         self._last_checkpoint_targets: int = 0
         self._last_checkpoint_time: float = time.perf_counter()
         self._last_checkpoint_wall_time: float = time.time()
@@ -149,6 +152,9 @@ class WorkflowOrchestrator:
         self._timeout_check_counter: int = 0
         self._checkpoint_retries: int = 0
         self._checkpoint_disabled: bool = False
+        # None = no checkpoint attempted yet; True = last attempt persisted;
+        # False = persistence failing (build must not claim resumability).
+        self._checkpoint_healthy: Optional[bool] = None
 
         self._load_or_create_manifest()
         # Allow YAML to skip directly to COMPILING (patches+gn gen already done there)
@@ -297,6 +303,7 @@ class WorkflowOrchestrator:
         self._last_checkpoint_wall_time = time.time()
         self._checkpoint_retries = 0
         self._checkpoint_disabled = False
+        self._checkpoint_healthy = None
 
         # Restore only when local state is missing/invalid
         ninja_log = self.ninja_log_path
@@ -326,8 +333,18 @@ class WorkflowOrchestrator:
                 proc.terminate()
                 # Upload final checkpoint before exiting (best-effort)
                 try:
-                    self.checkpoint_mgr.create_checkpoint(self._last_checkpoint_wall_time)
+                    _, ok = self.checkpoint_mgr.create_checkpoint(
+                        self._last_checkpoint_wall_time,
+                    )
+                    if ok:
+                        self._checkpoint_healthy = True
+                        self._last_checkpoint_wall_time = time.time()
+                    else:
+                        self._checkpoint_healthy = False
+                        logger.warning("WARNING: checkpoint could not be persisted")
                 except Exception as exc:
+                    self._checkpoint_healthy = False
+                    logger.warning("WARNING: checkpoint could not be persisted")
                     logger.warning("Final checkpoint upload failed: %s", exc)
                 return "FAILED"
 
@@ -339,38 +356,7 @@ class WorkflowOrchestrator:
             self.tracker.targets_completed = completed
             self.tracker.total_targets = total_targets
 
-            if not self._checkpoint_disabled and self.checkpoint_mgr.should_checkpoint(
-                elapsed_minutes, completed, self._last_checkpoint_targets
-            ):
-                logger.info("Checkpoint triggered at %d/%d targets", completed, total_targets)
-                try:
-                    _, ok = self.checkpoint_mgr.create_checkpoint(self._last_checkpoint_wall_time)
-                except Exception as exc:
-                    logger.warning("Checkpoint failed: %s", exc)
-                    ok = False
-
-                # Advance counters on every attempt (even failure) to prevent
-                # an infinite retry loop when should_checkpoint keeps returning
-                # True because _last_checkpoint_targets / _last_checkpoint_time
-                # were never updated.
-                self._last_checkpoint_targets = completed
-                self._last_checkpoint_time = time.perf_counter()
-
-                if ok:
-                    # Only advance the mtime cutoff when upload actually succeeded.
-                    # Without this guard, a failed checkpoint causes files in
-                    # the window to be permanently omitted from all future deltas.
-                    self._last_checkpoint_wall_time = time.time()
-                    self._checkpoint_retries = 0
-                else:
-                    self._checkpoint_retries += 1
-                    if self._checkpoint_retries >= MAX_CHECKPOINT_RETRIES:
-                        logger.warning(
-                            "Checkpoint failed %d consecutive times — disabling "
-                            "all future checkpoints for this build",
-                            self._checkpoint_retries,
-                        )
-                        self._checkpoint_disabled = True
+            self._maybe_checkpoint(completed, elapsed_minutes)
 
             if retcode is not None:
                 break
@@ -381,10 +367,19 @@ class WorkflowOrchestrator:
         self.tracker.total_targets = total_targets
         self.tracker.end_compile(total_targets)
 
+        # A healthy compilation with broken checkpoint storage must still
+        # finish — but it must NOT claim resumability.
+        resumable_ok = self.checkpoints_saved()
         if proc.returncode == 0:
+            self.manifest["checkpoint_healthy"] = resumable_ok
             self.manifest["build_complete"] = True
             self.manifest.save(self.manifest_path)
             logger.info("Build completed: %d/%d targets", completed, total_targets)
+            if not resumable_ok:
+                logger.warning(
+                    "Build completed but checkpoints were NOT persisted — "
+                    "the next run will start from scratch (NOT resumable)"
+                )
             return "VERIFYING"
 
         logger.warning("Ninja exited code %d (%d/%d targets)", proc.returncode, completed, total_targets)
@@ -392,13 +387,86 @@ class WorkflowOrchestrator:
             return "RECOVERING"
         return "FAILED"
 
+    def checkpoints_saved(self) -> bool:
+        """Return ``True`` when checkpoint persistence is trustworthy.
+
+        ``False`` only when an upload actually failed or checkpointing was
+        disabled after repeated failures.  Never-triggered checkpoints
+        (short builds) count as healthy.
+        """
+        if self._checkpoint_disabled:
+            return False
+        return self._checkpoint_healthy is not False
+
+    def _maybe_checkpoint(self, completed: int, elapsed_minutes: float) -> None:
+        """Trigger a rolling checkpoint when thresholds are exceeded.
+
+        Checkpoint failures NEVER cancel the build: they are retried on the
+        next threshold crossing and, after MAX_CHECKPOINT_RETRIES consecutive
+        failures, checkpointing is disabled for the rest of the run while
+        compilation continues.  The failure is reported loudly so the run is
+        never mistaken for a resumable one.
+        """
+        if self._checkpoint_disabled:
+            return
+        if not self.checkpoint_mgr.should_checkpoint(
+            elapsed_minutes, completed, self._last_checkpoint_targets
+        ):
+            return
+
+        logger.info(
+            "Checkpoint triggered at %d/%d targets",
+            completed, self._total_targets_hint,
+        )
+        try:
+            _, ok = self.checkpoint_mgr.create_checkpoint(
+                self._last_checkpoint_wall_time,
+            )
+        except Exception as exc:
+            logger.warning("Checkpoint failed: %s", exc)
+            ok = False
+
+        # Advance counters on every attempt (even failure) to prevent
+        # an infinite retry loop when should_checkpoint keeps returning
+        # True because _last_checkpoint_targets / _last_checkpoint_time
+        # were never updated.
+        self._last_checkpoint_targets = completed
+        self._last_checkpoint_time = time.perf_counter()
+
+        if ok:
+            # Only advance the mtime cutoff when upload actually succeeded.
+            # Without this guard, a failed checkpoint causes files in
+            # the window to be permanently omitted from all future deltas.
+            self._last_checkpoint_wall_time = time.time()
+            self._checkpoint_retries = 0
+            self._checkpoint_healthy = True
+            return
+
+        self._checkpoint_retries += 1
+        self._checkpoint_healthy = False
+        logger.warning("WARNING: checkpoint could not be persisted")
+        if self._checkpoint_retries >= MAX_CHECKPOINT_RETRIES:
+            logger.warning(
+                "Checkpoint failed %d consecutive times — disabling "
+                "all future checkpoints for this build (compilation "
+                "continues; this run will NOT be resumable)",
+                self._checkpoint_retries,
+            )
+            self._checkpoint_disabled = True
+
     def handle_checkpointing(self) -> str:
         logger.info("Creating final checkpoint")
         try:
             _, ok = self.checkpoint_mgr.create_checkpoint(self._last_checkpoint_wall_time)
             if ok:
+                self._checkpoint_healthy = True
                 self._last_checkpoint_wall_time = time.time()
+            else:
+                self._checkpoint_healthy = False
+                logger.warning("WARNING: checkpoint could not be persisted")
         except Exception as exc:
+            self._checkpoint_healthy = False
+            logger.warning("WARNING: checkpoint could not be persisted")
             logger.warning("Final checkpoint failed: %s", exc)
         return "VERIFYING"
 
@@ -460,6 +528,7 @@ class WorkflowOrchestrator:
             "compile_rate": round(compile_rate, 2),
             "workflow_state": self.current_state,
             "checkpoint_number": self.manifest.get("checkpoint_counter", 0),
+            "checkpoint_healthy": self.checkpoints_saved(),
             "build_attempt": self.manifest.get("build_attempt", 1),
             "last_ninja_command": self._last_ninja_command,
         }

@@ -34,6 +34,11 @@ on:
 permissions:
   contents: read  # plan job only; build job overrides to write
 
+# Minimum required permissions (verified):
+#   - plan job:  contents: read  (matrix computation only)
+#   - build job: contents: write (gh release create/upload/delete for
+#     checkpoint persistence in resume_build.py). No other scopes granted.
+
 concurrency:
   group: nightly-build
   cancel-in-progress: false
@@ -146,6 +151,8 @@ jobs:
 
       # ── State: PATCHING + CONFIGURING ───────────────────────
       - name: "State: PATCHING/CONFIGURING — apply patches and gn gen"
+        env:
+          GH_TOKEN: ${{ github.token }}  # resume_build.py clear deletes the checkpoint release
         run: |
           # Forced fresh start: clear GitHub release + local out/
           if [ "${{ inputs.force }}" = "true" ]; then
@@ -169,7 +176,26 @@ jobs:
           BROWSEROS_NINJA_JOBS: ${{ vars.BROWSEROS_NINJA_JOBS || '' }}
           GITHUB_RUN_NUMBER: ${{ github.run_number }}
           GITHUB_RUN_ID: ${{ github.run_id }}
+          # ROOT CAUSE FIX (exit status 4): gh requires an explicit token —
+          # GitHub Actions does NOT inject one into the step environment.
+          # Without GH_TOKEN every `gh release create/upload` fails with
+          # gh's auth error (exit code 4) and checkpoints never persist.
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # Preflight diagnostics BEFORE spending hours compiling: a build
+          # that cannot checkpoint is not resumable, so fail fast instead.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::GH_TOKEN is not exported to this step — gh cannot authenticate and checkpoints would never persist"
+            exit 1
+          fi
+          gh auth status || echo "::warning::gh auth status reported a problem — checkpoint persistence may fail"
+          ck_tag="build-checkpoint-${{ matrix.platform }}-${{ matrix.arch }}"
+          if gh release view "$ck_tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Existing checkpoint release '$ck_tag' found — build will resume from it"
+          else
+            echo "No existing checkpoint release '$ck_tag' — first checkpoint will create it"
+          fi
+
           uv run python scripts/ci/resume_build.py \
             orchestrate \
             --platform ${{ matrix.platform }}-${{ matrix.arch }} \

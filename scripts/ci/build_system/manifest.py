@@ -57,6 +57,11 @@ _FIELD_DEFAULTS: Dict[str, Any] = {
     "estimated_total_targets": 0,
     "last_successful_upload": "",
     "last_successful_checkpoint": "",
+    "checkpoint_counter": 0,
+    # Optimistic default: healthy until a persistence failure proves
+    # otherwise (mirrors WorkflowOrchestrator.checkpoints_saved()).
+    "checkpoint_healthy": True,
+    "build_attempt": 1,
     "build_complete": False,
     "packaging_complete": False,
     "release_complete": False,
@@ -265,8 +270,11 @@ class BuildManifest:
         Uses write-to-temp-then-rename for crash safety: if the process is
         killed mid-write the old file (if any) is preserved.
         """
-        self._data["checksum"] = _compute_checksum(self._data)
+        # Refresh timestamp BEFORE computing the checksum so that the
+        # stored checksum matches the bytes actually written; otherwise
+        # every save→load round trip fails verification.
         self._data["timestamp"] = datetime.now(timezone.utc).isoformat()
+        self._data["checksum"] = _compute_checksum(self._data)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(
@@ -391,6 +399,12 @@ class BuildManifest:
             raise KeyError(key)
         self._data[key] = value
         self._data["timestamp"] = datetime.now(timezone.utc).isoformat()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Dict-style access with a default for missing/unknown keys."""
+        if key not in _FIELD_DEFAULTS:
+            return default
+        return self._data.get(key, default)
 
     # -- Conversion --------------------------------------------------------
 

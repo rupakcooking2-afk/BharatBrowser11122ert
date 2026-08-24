@@ -23,6 +23,7 @@ Usage
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 # Ensure the repository root is on sys.path so that
@@ -231,7 +232,6 @@ def cmd_clear(args: argparse.Namespace) -> int:
 
 def main() -> int:
     import argparse
-    import time  # noqa: F401 — used in cmd_checkpoint
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
