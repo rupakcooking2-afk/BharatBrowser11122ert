@@ -298,12 +298,6 @@ class WorkflowOrchestrator:
             return "VERIFYING"
 
         self.tracker.start_compile()
-        self._last_checkpoint_targets = 0
-        self._last_checkpoint_time = time.perf_counter()
-        self._last_checkpoint_wall_time = time.time()
-        self._checkpoint_retries = 0
-        self._checkpoint_disabled = False
-        self._checkpoint_healthy = None
 
         # Restore only when local state is missing/invalid
         ninja_log = self.ninja_log_path
@@ -311,6 +305,13 @@ class WorkflowOrchestrator:
         if needs_restore and self.checkpoint_mgr.has_checkpoint():
             logger.info("Restoring from GitHub checkpoint (local .ninja_log missing)")
             self.checkpoint_mgr.restore_state()
+
+        self._last_checkpoint_targets = fast_ninja_count(self.ninja_log_path)
+        self._last_checkpoint_time = time.perf_counter()
+        self._last_checkpoint_wall_time = time.time()
+        self._checkpoint_retries = 0
+        self._checkpoint_disabled = False
+        self._checkpoint_healthy = None
 
         ninja_path = self._locate_autoninja(self.chromium_src)
         cmd = [ninja_path, "-C", str(self.chromium_src / self.build_dir), "-k", "0"]
@@ -408,6 +409,17 @@ class WorkflowOrchestrator:
         never mistaken for a resumable one.
         """
         if self._checkpoint_disabled:
+            return
+        # Do not checkpoint if progress has not advanced beyond the last
+        # checkpoint. This prevents infinite loops when resuming from a
+        # checkpoint at the same target count.
+        if completed <= self._last_checkpoint_targets:
+            logger.debug(
+                "Skipping checkpoint: progress not advanced "
+                "(completed=%d, last=%d, next_threshold=%d)",
+                completed, self._last_checkpoint_targets,
+                self._last_checkpoint_targets + CHECKPOINT_INTERVAL_TARGETS,
+            )
             return
         if not self.checkpoint_mgr.should_checkpoint(
             elapsed_minutes, completed, self._last_checkpoint_targets
