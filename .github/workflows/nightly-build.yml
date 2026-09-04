@@ -128,7 +128,7 @@ jobs:
             ~/.ccache
             ~/AppData/Local/ccache
             ~/Library/Caches/ccache
-          key: ccache-${{ runner.os }}-${{ runner.arch }}
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ env.version }}-${{ env.CCACHE_COMPILERCHECK }}
 
       # ── State: DOWNLOADING ──────────────────────────────────
       - name: "State: DOWNLOADING — ensure Chromium checkout"
@@ -170,6 +170,23 @@ jobs:
         working-directory: packages/browseros
 
       # ── State: COMPILING (resumable orchestration) ────────
+      - name: "State: COMPILING — runtime diagnostics"
+        id: diagnostics
+        run: |
+          echo "=== Runtime build diagnostics ==="
+          echo "CPU count:        $(nproc)"
+          echo "Total RAM (GB):   $(free -m | awk '/^Mem:/{printf "%.1f", $2/1024}')"
+          echo "Available RAM (GB): $(free -m | awk '/^Available:/{printf "%.1f", $2/1024}')"
+          echo "Ninja jobs:       ${BROWSEROS_NINJA_JOBS:-auto}"
+          echo "CC version:       $(ccache -V 2>/dev/null || echo 'not found')"
+          echo "CC cache dir:     ${CCACHE_BASEDIR:-~/.ccache}"
+          if [ -x "$(ccache -s 2>/dev/null)" ]; then
+            ccache -s 2>/dev/null | head -5
+          fi
+          echo "Disk space:       $(df -h "$CHROMIUM_SRC/out/Default_${{ matrix.arch }}" 2>/dev/null || echo 'N/A')"
+          echo "================================="
+        shell: bash
+
       - name: "State: COMPILING — orchestrate resumable build"
         id: orchestrate
         env:

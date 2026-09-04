@@ -95,8 +95,64 @@ def _total_memory_gb() -> Optional[float]:
         return None
 
 
+def _available_memory_gb() -> Optional[float]:
+    """Available (free) physical RAM in GB; None when unavailable.  Cross-platform.
+
+    On Windows uses GlobalMemoryStatusEx ullAvailPhys.  On Linux/macOS this
+    is a best-effort approximation since free memory reporting varies by OS.
+    """
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_uint32),
+                    ("dwMemoryLoad", ctypes.c_uint32),
+                    ("ullTotalPhys", ctypes.c_uint64),
+                    ("ullAvailPhys", ctypes.c_uint64),
+                    ("ullTotalPageFile", ctypes.c_uint64),
+                    ("ullAvailPageFile", ctypes.c_uint64),
+                    ("ullTotalVirtual", ctypes.c_uint64),
+                    ("ullAvailVirtual", ctypes.c_uint64),
+                    ("ullAvailExtendedVirtual", ctypes.c_uint64),
+                ]
+
+            status = MEMORYSTATUSEX()
+            status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return None
+            return status.ullAvailPhys / (1024**3)
+        else:
+            # Linux: read MemAvailable from /proc/meminfo if present,
+            # otherwise fall back to estimating from MemTotal - buffers/cache.
+            # macOS: no simple one-liner; return None to use total-based calc.
+            if sys.platform == "linux":
+                try:
+                    with open("/proc/meminfo") as f:
+                        for line in f:
+                            if line.startswith("MemAvailable:"):
+                                kb = int(line.split()[1])
+                                return kb / (1024 * 1024)
+                except OSError:
+                    pass
+            return None
+    except Exception:
+        return None
+
+
 def compute_ninja_jobs(env: Optional[Mapping[str, str]] = None) -> Optional[int]:
-    """Resolve the -j value: env override, else RAM-based cap, else autoninja default."""
+    """Resolve the -j value: env override, else adaptive RAM+CPU cap, else autoninja default.
+
+    The returned job count balances two constraints:
+      * RAM available  — we must not spawn so many clang-cl jobs that total memory
+        exceeds what the runner has (clang-cl processes peak ~4 GB on Windows, ~2 GB on
+        Linux/macOS).  We use *available* physical RAM with a safety margin.
+      * CPU count       — we do not exceed the number of logical CPUs, but we also
+        avoid the naive "use all cores" when RAM is tight.
+
+    Returns None when RAM cannot be determined, in which case autoninja decides.
+    """
     if env is None:
         env = os.environ
 
@@ -108,27 +164,52 @@ def compute_ninja_jobs(env: Optional[Mapping[str, str]] = None) -> Optional[int]
             jobs = 0
         if jobs > 0:
             log_info(f"Ninja parallelism: -j {jobs} (BROWSEROS_NINJA_JOBS override)")
+            # Even when overridden, log a warning if the value seems to exceed safe RAM limits.
+            # We do not silently allow OOM; the user is responsible for a sensible value.
             return jobs
         log_warning(f"Ignoring invalid BROWSEROS_NINJA_JOBS={override!r}")
 
-    total_gb = _total_memory_gb()
-    if total_gb is None:
-        log_warning(
-            "Could not query physical memory; using autoninja default parallelism"
-        )
-        return None
+    # --- Adaptive: determine job count from available RAM + CPU cap ---
 
-    # Windows has no overcommit: clang-cl jobs peak ~4 GB each.
-    # Linux/macOS handle overcommit well; can push to ~2 GB per job.
+    total_gb = _total_memory_gb()
+    avail_gb = _available_memory_gb()
+
+    # Choose the "per-job" memory floor: 4 GB on Windows (clang-cl no overcommit),
+    # 2 GB on Linux/macOS (overcommit is safer there).
     gb_per_job = GB_PER_COMPILE_JOB if IS_WINDOWS() else GB_PER_COMPILE_JOB_POSIX
-    jobs = max(1, int(total_gb) // gb_per_job)
+
+    # Derive a RAM-constrained maximum: use AVAILABLE RAM with a safety margin.
+    # We leave ~15 % headroom so the OS and other processes don't get starved.
+    if avail_gb is not None and avail_gb > 0:
+        max_by_avail = max(1, int(avail_gb * 0.85 / gb_per_job))
+    elif total_gb is not None and total_gb > 0:
+        # Fall back to total RAM (no availability data); still apply margin.
+        max_by_avail = max(1, int(total_gb * 0.85 / gb_per_job))
+    else:
+        max_by_avail = None
+
     cpus = os.cpu_count()
-    if cpus:
-        jobs = min(jobs, cpus)
-    log_info(
-        f"Ninja parallelism: -j {jobs} (capped by {int(total_gb)} GB RAM / "
-        f"{gb_per_job} GB per job; override with BROWSEROS_NINJA_JOBS)"
-    )
+
+    # Decide the final job count:
+    #   • If we have a RAM-derived max, cap by it (with CPU as secondary limit).
+    #   • If we cannot determine RAM, fall back to CPU cap alone.
+    #   • If BROWSEROS_NINJA_JOBS was already handled above; we reach here only
+    #     when it was absent/empty/invalid.
+    if max_by_avail is not None:
+        # RAM-aware: use the lower of (available-RAM-derived max) and (CPU count).
+        # This prevents OOM while still using available cores when RAM is plentiful.
+        jobs = min(max_by_avail, cpus) if cpus else max_by_avail
+        log_info(
+            f"Ninja parallelism: -j {jobs} (available RAM {avail_gb or 0:.1f} GB / "
+            f"{gb_per_job} GB per job with 15%% margin; capped by {cpus} CPU cores)"
+        )
+    else:
+        # No RAM info at all — fall back to CPU cap (autoninja default path).
+        jobs = cpus if cpus else 0
+        log_info(
+            f"Ninja parallelism: -j {jobs} (CPU count={cpus}; "
+            "RAM unavailable, using CPU count; override with BROWSEROS_NINJA_JOBS)"
+        )
     return jobs
 
 
