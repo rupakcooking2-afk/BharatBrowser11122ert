@@ -199,6 +199,32 @@ jobs:
           # gh's auth error (exit code 4) and checkpoints never persist.
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Preflight diagnostics: verify resume_build.py exists
+          # Running on Windows — use PowerShell Test-Path
+          if ($PSVersionTable) {
+            $scriptPath = "scripts/ci/resume_build.py"
+            if (-not (Test-Path $scriptPath)) {
+              echo "::error::Resume script not found: $scriptPath"
+              echo "::error::Expected path relative to workspace root"
+              exit 1
+            }
+            echo "Resume script found: $scriptPath"
+          } else {
+            # Bash equivalent
+            if [ ! -f "scripts/ci/resume_build.py" ]; then
+              echo "::error::Resume script not found: scripts/ci/resume_build.py"
+              echo "::error::Expected path relative to workspace root"
+              exit 1
+            fi
+            echo "Resume script found: scripts/ci/resume_build.py"
+          }
+          # Verify the script is not the escaped version
+          if (Select-String -Path "scripts/ci/resume_build.py" -Pattern "\\_") {
+            echo "::error::Script path contains invalid escaped underscore: _build.py"
+            echo "::error::Expected: resume_build.py (without backslash)"
+            exit 1
+          }
+          
           # Preflight diagnostics BEFORE spending hours compiling: a build
           # that cannot checkpoint is not resumable, so fail fast instead.
           if [ -z "${GH_TOKEN:-}" ]; then
